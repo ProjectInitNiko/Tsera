@@ -70,6 +70,8 @@ tar -xjf parakeet-v3-int8.tar.bz2
 
 ## Roadmap
 
-- [ ] Modes IA (reformulation mail / note / prompt custom via LLM)
+- [ ] Modes IA (reformulation mail / note / prompt custom via LLM) — décidé 09/07 :
+      déclenchement par 2e raccourci dédié (Ctrl+Alt+Space), moteur LLM à choisir
+      le moment venu (API Haiku ~0,1 ¢/usage vs Ollama local gratuit mais lent CPU)
 - [x] Vocabulaire custom (noms propres : PERSEUS, Mecazic, GHL…) — hotwords + corrections
 - [ ] Toggle en plus du push-to-talk
