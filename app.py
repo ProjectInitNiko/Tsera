@@ -1,7 +1,8 @@
 """PersonalWhisper — dictée locale push-to-talk.
 
-Maintenir la touche configurée (défaut : Ctrl droit), parler, relâcher :
+Maintenir la combinaison configurée (défaut : Ctrl + Espace), parler, relâcher :
 le texte transcrit se colle au curseur, dans n'importe quelle application.
+Pendant la dictée, un HUD « NK » avec les vagues de son s'affiche en bas d'écran.
 
 Tout tourne en local (Parakeet v3 via sherpa-onnx, CPU). Aucune donnée ne sort du PC.
 """
@@ -20,6 +21,7 @@ import pystray
 import sounddevice as sd
 from PIL import Image, ImageDraw
 
+from overlay import Overlay
 from stt import Transcriber
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,11 +35,12 @@ def load_config() -> dict:
 class Recorder:
     """Flux micro ouvert en continu ; on ne garde les frames que pendant la dictée."""
 
-    def __init__(self, sample_rate: int):
+    def __init__(self, sample_rate: int, on_level=None):
         self.sample_rate = sample_rate
         self._chunks: list[np.ndarray] = []
         self._active = False
         self._lock = threading.Lock()
+        self._on_level = on_level  # rms du chunk courant, pour le HUD
         self._stream = sd.InputStream(
             samplerate=sample_rate,
             channels=1,
@@ -48,8 +51,11 @@ class Recorder:
 
     def _callback(self, indata, frames, time_info, status):
         if self._active:
+            chunk = indata[:, 0].copy()
             with self._lock:
-                self._chunks.append(indata[:, 0].copy())
+                self._chunks.append(chunk)
+            if self._on_level is not None:
+                self._on_level(float(np.sqrt(np.mean(chunk * chunk))))
 
     def start(self):
         with self._lock:
@@ -103,7 +109,8 @@ def make_icon(recording: bool) -> Image.Image:
 class App:
     def __init__(self):
         self.cfg = load_config()
-        self.recorder = Recorder(self.cfg["sample_rate"])
+        self.overlay = Overlay(enabled=self.cfg.get("overlay", True))
+        self.recorder = Recorder(self.cfg["sample_rate"], on_level=self.overlay.push_level)
         self.recording = False
         self.record_started_at = 0.0
         self.busy = False
@@ -131,32 +138,68 @@ class App:
 
     # --- Push-to-talk -------------------------------------------------------
 
-    def on_press(self, _event):
+    def on_press(self, event):
+        print(f"[debug] press: {event.name} (scan {event.scan_code})", flush=True)
         if self.recording or self.busy:
             return
         self.recording = True
         self.record_started_at = time.monotonic()
         self.recorder.start()
         self.set_tray(True)
+        self.overlay.show_recording()
         self.beep(880, 70)
 
-    def on_release(self, _event):
+    def on_release(self, event):
+        print(f"[debug] release: {event.name}", flush=True)
         if not self.recording:
             return
         self.recording = False
         duration = time.monotonic() - self.record_started_at
         samples = self.recorder.stop()
         self.set_tray(False)
+        peak = float(np.abs(samples).max()) if samples.size else 0.0
+        print(
+            f"[debug] {duration:.2f}s, {samples.size} échantillons, pic {peak:.3f}",
+            flush=True,
+        )
 
         if duration < self.cfg["min_duration_s"] or samples.size == 0:
+            self.overlay.hide()
             return  # appui accidentel
         max_samples = int(self.cfg["max_duration_s"] * self.cfg["sample_rate"])
         samples = samples[:max_samples]
 
         self.busy = True
+        self.overlay.show_processing()
         threading.Thread(
             target=self._transcribe_and_paste, args=(samples, duration), daemon=True
         ).start()
+
+    # --- Combo modificateur + touche (ex. ctrl+space) -------------------------
+
+    def _modifiers_down(self) -> bool:
+        return all(keyboard.is_pressed(m) for m in self._modifiers)
+
+    def _combo_hook(self, event):
+        """Hook bloquant sur la touche de déclenchement.
+
+        Retourner False avale l'événement : indispensable pour l'espace, sinon
+        chaque appui (et l'auto-repeat pendant la dictée) taperait des espaces
+        dans l'application active.
+        """
+        if event.event_type == "down":
+            if self.recording:
+                return False  # auto-repeat pendant la dictée
+            if self._modifiers_down():
+                if not self.busy:
+                    self.on_press(event)
+                return False
+            return True  # touche seule : comportement normal
+        # relâchement
+        if self.recording:
+            self.on_release(event)
+            return False
+        return True
 
     def _transcribe_and_paste(self, samples: np.ndarray, duration: float):
         try:
@@ -173,13 +216,23 @@ class App:
             self.beep(200, 300)
         finally:
             self.busy = False
+            self.overlay.hide()
 
     # --- Lancement ----------------------------------------------------------
 
     def run(self):
+        dev = sd.query_devices(kind="input")
+        print(f"[debug] micro : {dev['name']}", flush=True)
         hotkey = self.cfg["hotkey"]
-        keyboard.on_press_key(hotkey, self.on_press, suppress=False)
-        keyboard.on_release_key(hotkey, self.on_release, suppress=False)
+        if "+" in hotkey:
+            # Combo « modificateurs + déclencheur » (ex. ctrl+space) : hook
+            # bloquant sur le déclencheur, modificateurs vérifiés à la volée.
+            parts = [p.strip() for p in hotkey.split("+")]
+            self._modifiers, trigger = parts[:-1], parts[-1]
+            keyboard.hook_key(trigger, self._combo_hook, suppress=True)
+        else:
+            keyboard.on_press_key(hotkey, self.on_press, suppress=False)
+            keyboard.on_release_key(hotkey, self.on_release, suppress=False)
 
         menu = pystray.Menu(
             pystray.MenuItem(f"PersonalWhisper — maintenir [{hotkey}]", None, enabled=False),

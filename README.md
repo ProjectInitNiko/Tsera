@@ -2,7 +2,9 @@
 
 Dictée vocale locale push-to-talk pour Windows — clone maison de SuperWhisper.
 
-**Maintenir `Ctrl droit` → parler → relâcher** : le texte se colle au curseur, dans n'importe quelle app. 100 % local et offline (Parakeet-tdt-0.6b-v3 via sherpa-onnx, CPU).
+**Maintenir `Ctrl + Espace` → parler → relâcher** : le texte se colle au curseur, dans n'importe quelle app. Pendant la dictée, un HUD « NK » avec les vagues de son s'affiche en bas d'écran (puis des points pulsants pendant la transcription). 100 % local et offline (Parakeet-tdt-0.6b-v3 via sherpa-onnx, CPU).
+
+L'espace est avalé tant que Ctrl est enfoncé : pas d'espaces parasites tapés dans l'app active pendant la dictée.
 
 ## Lancer
 
@@ -20,13 +22,14 @@ Sans console (tray uniquement) :
 
 | Clé | Défaut | Description |
 | --- | --- | --- |
-| `hotkey` | `right ctrl` | Touche push-to-talk (syntaxe lib `keyboard`) |
+| `hotkey` | `ctrl+space` | Push-to-talk : combo `modificateurs+touche` (la touche finale est avalée pendant la dictée) ou touche seule (ex. `right ctrl`) |
 | `model_dir` | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | Dossier du modèle |
 | `num_threads` | `4` | Threads CPU pour l'inférence |
 | `min_duration_s` | `0.3` | En dessous = appui accidentel, ignoré |
 | `max_duration_s` | `120` | Coupe de sécurité |
 | `sounds` | `true` | Bips de feedback (début / erreur) |
 | `restore_clipboard` | `true` | Restaure le presse-papiers après collage |
+| `overlay` | `true` | HUD « NK » + vagues de son en bas d'écran pendant la dictée |
 
 ## Démarrage automatique avec Windows
 
