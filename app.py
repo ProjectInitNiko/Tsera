@@ -9,6 +9,7 @@ Tout tourne en local (Parakeet v3 via sherpa-onnx, CPU). Aucune donnée ne sort 
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -26,10 +27,28 @@ from stt import Transcriber
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Console Windows en cp1252 : force UTF-8 pour les accents et flèches des logs.
+# Sous pythonw, stdout/stderr sont None (print = no-op), on ne touche à rien.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 def load_config() -> dict:
     with open(os.path.join(APP_DIR, "config.json"), encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_vocab(cfg: dict) -> list[str]:
+    """Mots du vocabulaire custom (vocab.txt) — lignes vides et # ignorées."""
+    path = os.path.join(APP_DIR, cfg.get("vocab_file", "vocab.txt"))
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [w for w in (line.strip() for line in f) if w and not w.startswith("#")]
 
 
 class Recorder:
@@ -116,13 +135,29 @@ class App:
         self.busy = False
         self.icon: pystray.Icon | None = None
 
+        # Corrections post-transcription (casse + cafouillages connus),
+        # les clés les plus longues d'abord pour que « robo dk » passe avant « dk ».
+        self._corrections = [
+            (re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE), v)
+            for k, v in sorted(
+                self.cfg.get("corrections", {}).items(), key=lambda kv: -len(kv[0])
+            )
+        ]
+
         print("Chargement du modèle…", flush=True)
+        vocab = load_vocab(self.cfg)
         self.stt = Transcriber(
             model_dir=os.path.join(APP_DIR, self.cfg["model_dir"]),
             num_threads=self.cfg["num_threads"],
             sample_rate=self.cfg["sample_rate"],
+            vocab=vocab,
+            vocab_score=self.cfg.get("vocab_score", 2.0),
         )
-        print(f"Modèle chargé en {self.stt.load_time:.1f} s", flush=True)
+        mode = f"{len(vocab)} mots boostés (beam search)" if vocab else "aucun (greedy)"
+        print(
+            f"Modèle chargé en {self.stt.load_time:.1f} s — vocabulaire : {mode}",
+            flush=True,
+        )
 
     # --- Feedback -----------------------------------------------------------
 
@@ -166,6 +201,12 @@ class App:
         if duration < self.cfg["min_duration_s"] or samples.size == 0:
             self.overlay.hide()
             return  # appui accidentel
+        if peak < self.cfg.get("min_peak", 0.008):
+            # Quasi-silence : le beam search + vocabulaire boosté peut
+            # halluciner un mot sur du bruit de fond, on n'envoie rien.
+            self.overlay.hide()
+            self.beep(300, 150)
+            return
         max_samples = int(self.cfg["max_duration_s"] * self.cfg["sample_rate"])
         samples = samples[:max_samples]
 
@@ -201,10 +242,15 @@ class App:
             return False
         return True
 
+    def _apply_corrections(self, text: str) -> str:
+        for rx, replacement in self._corrections:
+            text = rx.sub(replacement, text)
+        return text
+
     def _transcribe_and_paste(self, samples: np.ndarray, duration: float):
         try:
             t0 = time.perf_counter()
-            text = self.stt.transcribe(samples)
+            text = self._apply_corrections(self.stt.transcribe(samples))
             dt = time.perf_counter() - t0
             if text:
                 paste_text(text, self.cfg["restore_clipboard"])

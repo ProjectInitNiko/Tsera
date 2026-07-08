@@ -5,7 +5,31 @@
   "sample_rate": 16000,
   "min_duration_s": 0.3,
   "max_duration_s": 120,
+  "min_peak": 0.008,
   "sounds": true,
   "restore_clipboard": true,
-  "overlay": true
+  "overlay": true,
+  "vocab_file": "vocab.txt",
+  "vocab_score": 2.0,
+  "corrections": {
+    "perseus": "PERSEUS",
+    "perceus": "PERSEUS",
+    "persée": "PERSEUS",
+    "mecazic": "Mecazic",
+    "meccazic": "Mecazic",
+    "mékazic": "Mecazic",
+    "megazik": "Mégazik",
+    "méga zik": "Mégazik",
+    "adomeos": "Adomeos",
+    "adoméos": "Adomeos",
+    "g h l": "GHL",
+    "ghl": "GHL",
+    "robodk": "RoboDK",
+    "robo dk": "RoboDK",
+    "supmeca": "Supméca",
+    "supabase": "Supabase",
+    "livekit": "LiveKit",
+    "live kit": "LiveKit",
+    "okan": "Okan"
+  }
 }
