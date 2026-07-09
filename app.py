@@ -389,5 +389,27 @@ class App:
         os._exit(0)
 
 
+_SINGLE_INSTANCE_MUTEX = None  # gardé en vie tant que le process tourne
+
+
+def ensure_single_instance():
+    """Empêche une 2e instance (donc un 2e hook clavier qui doublerait l'espace).
+
+    Démarrage auto au login + double-clic sur le raccourci = risque de doublon :
+    un mutex nommé Windows garantit qu'une seule instance vit à la fois.
+    """
+    global _SINGLE_INSTANCE_MUTEX
+    import ctypes
+
+    ERROR_ALREADY_EXISTS = 183
+    _SINGLE_INSTANCE_MUTEX = ctypes.windll.kernel32.CreateMutexW(
+        None, False, "PersonalWhisper_SingleInstance_Mutex"
+    )
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        print("PersonalWhisper tourne déjà — cette instance se ferme.", flush=True)
+        sys.exit(0)
+
+
 if __name__ == "__main__":
+    ensure_single_instance()
     App().run()

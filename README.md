@@ -54,11 +54,24 @@ Note technique : le modèle exporté n'embarque pas son sentencepiece ; un
 `bpe_from_tokens.vocab` (scores uniformes) est généré au premier lancement dans le
 dossier du modèle pour encoder les hotwords — biasing vérifié effectif avec ça.
 
-## Démarrage automatique avec Windows
+## Installation comme app Windows (raccourci + démarrage auto)
 
-Créer un raccourci vers `.venv\Scripts\pythonw.exe` avec argument `app.py`
-(répertoire de démarrage : `D:\Projects\PersonalWhisper`) dans le dossier
-`shell:startup`.
+```
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+Crée un **raccourci sur le Bureau** (`PersonalWhisper`, icône « NK », lance en
+tray sans console via `pythonw.exe`) **et** un raccourci dans `shell:startup`
+pour le **démarrage automatique à chaque login Windows**. Options :
+
+- `install.ps1 -NoStartup` — Bureau seulement, pas de démarrage auto
+- `install.ps1 -Uninstall` — retire les deux raccourcis
+
+Une seule instance peut tourner à la fois (mutex nommé Windows) : démarrage auto
++ double-clic sur le raccourci ne créent jamais deux hooks clavier. L'icône se
+régénère avec `python make_icon.py`.
+
+Clic droit sur l'icône de la barre système → **Quitter**.
 
 ## Setup depuis zéro
 
