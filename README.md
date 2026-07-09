@@ -4,6 +4,8 @@ Dictée vocale locale push-to-talk pour Windows — clone maison de SuperWhisper
 
 **Maintenir `Ctrl + Espace` → parler → relâcher** : le texte se colle au curseur, dans n'importe quelle app. Pendant la dictée, un HUD « NK » avec les vagues de son s'affiche en bas d'écran (puis des points pulsants pendant la transcription). 100 % local et offline (Parakeet-tdt-0.6b-v3 via sherpa-onnx, CPU).
 
+**Mode mains-libres (toggle) : `Ctrl + Shift + Espace`** — un appui démarre la dictée, un second l'arrête. Pas besoin de maintenir : on peut lâcher les touches et parler entre les deux. Sécurité : un toggle oublié se coupe seul à `max_duration_s`.
+
 L'espace est avalé tant que Ctrl est enfoncé : pas d'espaces parasites tapés dans l'app active pendant la dictée.
 
 ## Lancer
@@ -23,6 +25,7 @@ Sans console (tray uniquement) :
 | Clé | Défaut | Description |
 | --- | --- | --- |
 | `hotkey` | `ctrl+space` | Push-to-talk : combo `modificateurs+touche` (la touche finale est avalée pendant la dictée) ou touche seule (ex. `right ctrl`) |
+| `toggle_hotkey` | `ctrl+shift+space` | Mode mains-libres : 1er appui démarre, 2e arrête. `null` ou `""` pour désactiver. Peut partager le trigger du `hotkey` |
 | `model_dir` | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | Dossier du modèle |
 | `num_threads` | `4` | Threads CPU pour l'inférence |
 | `min_duration_s` | `0.3` | En dessous = appui accidentel, ignoré |
@@ -74,4 +77,4 @@ tar -xjf parakeet-v3-int8.tar.bz2
       déclenchement par 2e raccourci dédié (Ctrl+Alt+Space), moteur LLM à choisir
       le moment venu (API Haiku ~0,1 ¢/usage vs Ollama local gratuit mais lent CPU)
 - [x] Vocabulaire custom (noms propres : PERSEUS, Mecazic, GHL…) — hotwords + corrections
-- [ ] Toggle en plus du push-to-talk
+- [x] Toggle mains-libres (Ctrl+Shift+Espace) en plus du push-to-talk

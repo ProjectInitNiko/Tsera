@@ -131,9 +131,12 @@ class App:
         self.overlay = Overlay(enabled=self.cfg.get("overlay", True))
         self.recorder = Recorder(self.cfg["sample_rate"], on_level=self.overlay.push_level)
         self.recording = False
+        self.record_mode: str | None = None  # "ptt" (maintenu) | "toggle" (mains-libres)
         self.record_started_at = 0.0
         self.busy = False
         self.icon: pystray.Icon | None = None
+        self._held: dict[str, bool] = {}      # trigger enfoncé (garde anti auto-repeat)
+        self._state_lock = threading.Lock()   # transitions recording/busy atomiques
 
         # Corrections post-transcription (casse + cafouillages connus),
         # les clés les plus longues d'abord pour que « robo dk » passe avant « dk ».
@@ -171,76 +174,142 @@ class App:
         if self.icon is not None:
             self.icon.icon = make_icon(recording)
 
-    # --- Push-to-talk -------------------------------------------------------
+    # --- Enregistrement (push-to-talk + toggle) -----------------------------
 
-    def on_press(self, event):
-        print(f"[debug] press: {event.name} (scan {event.scan_code})", flush=True)
-        if self.recording or self.busy:
-            return
-        self.recording = True
+    def _start(self, mode: str):
+        """Démarre un enregistrement. `mode` = "ptt" (maintenu) ou "toggle" (mains-libres)."""
+        with self._state_lock:
+            if self.recording or self.busy:
+                return
+            self.recording = True
+            self.record_mode = mode
         self.record_started_at = time.monotonic()
         self.recorder.start()
         self.set_tray(True)
         self.overlay.show_recording()
         self.beep(880, 70)
+        print(f"[debug] start ({mode})", flush=True)
+        if mode == "toggle":
+            threading.Thread(target=self._toggle_watchdog, daemon=True).start()
 
-    def on_release(self, event):
-        print(f"[debug] release: {event.name}", flush=True)
-        if not self.recording:
-            return
-        self.recording = False
+    def _stop_and_process(self):
+        """Arrête l'enregistrement en cours et lance la transcription si pertinent."""
+        with self._state_lock:
+            if not self.recording:
+                return
+            self.recording = False
+            mode = self.record_mode
+            self.record_mode = None
+            self.busy = True  # verrouille tout de suite : pas de nouvel enregistrement
         duration = time.monotonic() - self.record_started_at
         samples = self.recorder.stop()
         self.set_tray(False)
         peak = float(np.abs(samples).max()) if samples.size else 0.0
         print(
-            f"[debug] {duration:.2f}s, {samples.size} échantillons, pic {peak:.3f}",
+            f"[debug] stop ({mode}) {duration:.2f}s, {samples.size} éch., pic {peak:.3f}",
             flush=True,
         )
 
         if duration < self.cfg["min_duration_s"] or samples.size == 0:
+            self.busy = False
             self.overlay.hide()
             return  # appui accidentel
         if peak < self.cfg.get("min_peak", 0.008):
             # Quasi-silence : le beam search + vocabulaire boosté peut
             # halluciner un mot sur du bruit de fond, on n'envoie rien.
+            self.busy = False
             self.overlay.hide()
             self.beep(300, 150)
             return
         max_samples = int(self.cfg["max_duration_s"] * self.cfg["sample_rate"])
         samples = samples[:max_samples]
 
-        self.busy = True
         self.overlay.show_processing()
         threading.Thread(
             target=self._transcribe_and_paste, args=(samples, duration), daemon=True
         ).start()
 
-    # --- Combo modificateur + touche (ex. ctrl+space) -------------------------
+    def _toggle_watchdog(self):
+        """Sécurité mains-libres : coupe un toggle oublié à max_duration_s."""
+        limit = self.cfg["max_duration_s"]
+        while True:
+            with self._state_lock:
+                still_on = self.recording and self.record_mode == "toggle"
+            if not still_on:
+                return
+            if time.monotonic() - self.record_started_at >= limit:
+                print("[debug] toggle : limite de durée atteinte, arrêt auto", flush=True)
+                self.beep(500, 120)
+                self._stop_and_process()
+                return
+            time.sleep(0.5)
 
-    def _modifiers_down(self) -> bool:
-        return all(keyboard.is_pressed(m) for m in self._modifiers)
+    # --- Hooks clavier (combo suppressif + touche seule) ---------------------
 
-    def _combo_hook(self, event):
-        """Hook bloquant sur la touche de déclenchement.
+    def _make_hook(self, trigger: str, entries: list[tuple[list[str], str]]):
+        """Fabrique le hook bloquant du `trigger`, partagé par tous ses combos.
 
-        Retourner False avale l'événement : indispensable pour l'espace, sinon
-        chaque appui (et l'auto-repeat pendant la dictée) taperait des espaces
-        dans l'application active.
+        `entries` = [(modificateurs, mode), …] trié du plus spécifique au plus
+        général (ex. ctrl+shift avant ctrl). Retourner False avale l'événement :
+        indispensable pour l'espace, sinon chaque appui (et l'auto-repeat pendant
+        la dictée) taperait un espace dans l'application active.
         """
-        if event.event_type == "down":
-            if self.recording:
-                return False  # auto-repeat pendant la dictée
-            if self._modifiers_down():
-                if not self.busy:
-                    self.on_press(event)
+
+        def hook(event):
+            if event.event_type == "down":
+                active = next(
+                    (
+                        (mods, mode)
+                        for mods, mode in entries
+                        if all(keyboard.is_pressed(m) for m in mods)
+                    ),
+                    None,
+                )
+                if self._held.get(trigger):
+                    # auto-repeat : on avale tant qu'un combo est actif / qu'on dicte
+                    return False if (active or self.recording) else True
+                self._held[trigger] = True
+                if self.busy:
+                    return False if active else True
+                if active is None:
+                    return True  # trigger sans ses modificateurs = touche normale
+                _, mode = active
+                if mode == "ptt":
+                    if not self.recording:
+                        self._start("ptt")
+                elif self.recording and self.record_mode == "toggle":
+                    self._stop_and_process()  # 2e appui = fin du mains-libres
+                elif not self.recording:
+                    self._start("toggle")  # 1er appui = début du mains-libres
                 return False
-            return True  # touche seule : comportement normal
-        # relâchement
-        if self.recording:
-            self.on_release(event)
-            return False
-        return True
+            # relâchement
+            self._held[trigger] = False
+            if self.recording and self.record_mode == "ptt":
+                self._stop_and_process()  # PTT : le relâchement arrête
+                return False
+            return False if self.recording else True  # toggle : ne stoppe pas
+
+        return hook
+
+    def _single_press(self, mode: str, trigger: str):
+        """Touche seule (ex. right ctrl), non suppressive : garde anti auto-repeat."""
+        if self._held.get(trigger):
+            return
+        self._held[trigger] = True
+        if self.busy:
+            return
+        if mode == "ptt":
+            if not self.recording:
+                self._start("ptt")
+        elif self.recording and self.record_mode == "toggle":
+            self._stop_and_process()
+        elif not self.recording:
+            self._start("toggle")
+
+    def _single_release(self, mode: str, trigger: str):
+        self._held[trigger] = False
+        if mode == "ptt" and self.recording and self.record_mode == "ptt":
+            self._stop_and_process()
 
     def _apply_corrections(self, text: str) -> str:
         for rx, replacement in self._corrections:
@@ -269,24 +338,48 @@ class App:
     def run(self):
         dev = sd.query_devices(kind="input")
         print(f"[debug] micro : {dev['name']}", flush=True)
-        hotkey = self.cfg["hotkey"]
-        if "+" in hotkey:
-            # Combo « modificateurs + déclencheur » (ex. ctrl+space) : hook
-            # bloquant sur le déclencheur, modificateurs vérifiés à la volée.
-            parts = [p.strip() for p in hotkey.split("+")]
-            self._modifiers, trigger = parts[:-1], parts[-1]
-            keyboard.hook_key(trigger, self._combo_hook, suppress=True)
-        else:
-            keyboard.on_press_key(hotkey, self.on_press, suppress=False)
-            keyboard.on_release_key(hotkey, self.on_release, suppress=False)
 
+        ptt = self.cfg.get("hotkey", "ctrl+space")
+        toggle = self.cfg.get("toggle_hotkey") or None
+
+        # Regroupe les raccourcis par touche de déclenchement : push-to-talk et
+        # toggle peuvent partager le même trigger (ex. « space ») → un seul hook
+        # qui choisit le mode selon les modificateurs réellement enfoncés.
+        triggers: dict[str, list[tuple[list[str], str]]] = {}
+
+        def add(hk: str, mode: str):
+            parts = [p.strip() for p in hk.split("+")]
+            triggers.setdefault(parts[-1], []).append((parts[:-1], mode))
+
+        add(ptt, "ptt")
+        if toggle:
+            add(toggle, "toggle")
+
+        for trig, entries in triggers.items():
+            entries.sort(key=lambda e: -len(e[0]))  # plus spécifique d'abord
+            if any(mods for mods, _ in entries):
+                keyboard.hook_key(trig, self._make_hook(trig, entries), suppress=True)
+            else:
+                # Touche seule (legacy) : non suppressive pour ne rien avaler.
+                mode = entries[0][1]
+                keyboard.on_press_key(
+                    trig, lambda e, m=mode, t=trig: self._single_press(m, t), suppress=False
+                )
+                keyboard.on_release_key(
+                    trig, lambda e, m=mode, t=trig: self._single_release(m, t), suppress=False
+                )
+
+        toggle_label = f"  ·  toggle [{toggle}]" if toggle else ""
         menu = pystray.Menu(
-            pystray.MenuItem(f"PersonalWhisper — maintenir [{hotkey}]", None, enabled=False),
-            pystray.MenuItem("Mode : Brut", None, enabled=False),
+            pystray.MenuItem(
+                f"PersonalWhisper — maintenir [{ptt}]{toggle_label}", None, enabled=False
+            ),
             pystray.MenuItem("Quitter", self._quit),
         )
         self.icon = pystray.Icon("PersonalWhisper", make_icon(False), "PersonalWhisper", menu)
-        print(f"Prêt. Maintiens [{hotkey}] pour dicter.", flush=True)
+        ready = f"Prêt. Maintiens [{ptt}] pour dicter"
+        ready += f", ou [{toggle}] en mains-libres." if toggle else "."
+        print(ready, flush=True)
         self.beep(660, 60)
         self.icon.run()  # bloque jusqu'à Quitter
 
