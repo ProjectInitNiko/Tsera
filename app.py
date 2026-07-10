@@ -1,8 +1,14 @@
-"""PersonalWhisper — dictée locale push-to-talk.
+"""PersonalWhisper — dictée locale (push-to-talk + toggle mains-libres) avec UI.
 
-Maintenir la combinaison configurée (défaut : Ctrl + Espace), parler, relâcher :
-le texte transcrit se colle au curseur, dans n'importe quelle application.
-Pendant la dictée, un HUD « NK » avec les vagues de son s'affiche en bas d'écran.
+Deux raccourcis globaux :
+  - maintenir Ctrl+Espace          → push-to-talk
+  - Ctrl+Shift+Espace (1 appui/1)  → toggle mains-libres
+Le texte transcrit se colle au curseur, dans n'importe quelle application.
+
+L'interface (customtkinter) montre le statut live, l'historique des dictées et
+les réglages (raccourcis, micro, vocabulaire, corrections). Fermer la fenêtre la
+réduit dans la barre système ; l'app continue d'écouter. Lancer avec `--tray`
+pour démarrer directement réduit (utilisé par le raccourci de démarrage auto).
 
 Tout tourne en local (Parakeet v3 via sherpa-onnx, CPU). Aucune donnée ne sort du PC.
 """
@@ -37,14 +43,38 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 
+def log(*args):
+    """print sûr : no-op quand stdout est None (exécution sous pythonw)."""
+    if sys.stdout is None:
+        return
+    try:
+        print(*args, flush=True)
+    except Exception:
+        pass
+
+
+def config_path() -> str:
+    return os.path.join(APP_DIR, "config.json")
+
+
 def load_config() -> dict:
-    with open(os.path.join(APP_DIR, "config.json"), encoding="utf-8") as f:
+    with open(config_path(), encoding="utf-8") as f:
         return json.load(f)
+
+
+def save_config(cfg: dict):
+    with open(config_path(), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def vocab_path(cfg: dict) -> str:
+    return os.path.join(APP_DIR, cfg.get("vocab_file", "vocab.txt"))
 
 
 def load_vocab(cfg: dict) -> list[str]:
     """Mots du vocabulaire custom (vocab.txt) — lignes vides et # ignorées."""
-    path = os.path.join(APP_DIR, cfg.get("vocab_file", "vocab.txt"))
+    path = vocab_path(cfg)
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as f:
@@ -54,19 +84,36 @@ def load_vocab(cfg: dict) -> list[str]:
 class Recorder:
     """Flux micro ouvert en continu ; on ne garde les frames que pendant la dictée."""
 
-    def __init__(self, sample_rate: int, on_level=None):
+    def __init__(self, sample_rate: int, device=None, on_level=None):
         self.sample_rate = sample_rate
+        self.device = device
         self._chunks: list[np.ndarray] = []
         self._active = False
         self._lock = threading.Lock()
         self._on_level = on_level  # rms du chunk courant, pour le HUD
+        self._stream = None
+        self._open()
+
+    def _open(self):
         self._stream = sd.InputStream(
-            samplerate=sample_rate,
+            samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
+            device=self.device,
             callback=self._callback,
         )
         self._stream.start()
+
+    def set_device(self, device):
+        """Rouvre le flux sur un autre micro (à faire à l'arrêt, pas en dictée)."""
+        self._active = False
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        self.device = device
+        self._open()
 
     def _callback(self, indata, frames, time_info, status):
         if self._active:
@@ -125,30 +172,61 @@ def make_icon(recording: bool) -> Image.Image:
     return img
 
 
-class App:
-    def __init__(self):
-        self.cfg = load_config()
-        self.overlay = Overlay(enabled=self.cfg.get("overlay", True))
-        self.recorder = Recorder(self.cfg["sample_rate"], on_level=self.overlay.push_level)
+def compile_corrections(corrections: dict):
+    """Regex mots-entiers, les clés les plus longues d'abord (« robo dk » avant « dk »)."""
+    return [
+        (re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE), v)
+        for k, v in sorted(corrections.items(), key=lambda kv: -len(kv[0]))
+    ]
+
+
+def list_input_devices() -> list[tuple[int, str]]:
+    """(index, nom) des périphériques d'entrée disponibles."""
+    out = []
+    try:
+        for i, dev in enumerate(sd.query_devices()):
+            if dev.get("max_input_channels", 0) > 0:
+                out.append((i, dev["name"]))
+    except Exception:
+        pass
+    return out
+
+
+class Engine:
+    """Cœur : micro, raccourcis, transcription. Découplé de l'UI via `on_event`.
+
+    `on_event(kind, payload)` est appelé depuis n'importe quel thread ; l'UI se
+    charge de re-router vers son thread principal.
+      - ("status", s)          s ∈ loading|ready|recording_ptt|recording_toggle|processing|reloading
+      - ("transcription", d)   d = {time, text, audio_s, proc_s}
+      - ("notice", msg)        message transitoire (erreur / info)
+    """
+
+    def __init__(self, cfg: dict, overlay: Overlay, on_event):
+        self.cfg = cfg
+        self.overlay = overlay
+        self.on_event = on_event
         self.recording = False
-        self.record_mode: str | None = None  # "ptt" (maintenu) | "toggle" (mains-libres)
+        self.record_mode: str | None = None  # "ptt" | "toggle"
         self.record_started_at = 0.0
         self.busy = False
         self.icon: pystray.Icon | None = None
-        self._held: dict[str, bool] = {}      # trigger enfoncé (garde anti auto-repeat)
-        self._state_lock = threading.Lock()   # transitions recording/busy atomiques
+        self.status = "loading"
+        self.stt: Transcriber | None = None
+        self._held: dict[str, bool] = {}
+        self._state_lock = threading.Lock()
+        self._corrections = compile_corrections(self.cfg.get("corrections", {}))
+        self.recorder = Recorder(
+            self.cfg["sample_rate"],
+            device=self.cfg.get("device"),
+            on_level=self.overlay.push_level,
+        )
 
-        # Corrections post-transcription (casse + cafouillages connus),
-        # les clés les plus longues d'abord pour que « robo dk » passe avant « dk ».
-        self._corrections = [
-            (re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE), v)
-            for k, v in sorted(
-                self.cfg.get("corrections", {}).items(), key=lambda kv: -len(kv[0])
-            )
-        ]
+    # --- Chargement du modèle ------------------------------------------------
 
-        print("Chargement du modèle…", flush=True)
+    def load_model(self):
         vocab = load_vocab(self.cfg)
+        log("Chargement du modèle…")
         self.stt = Transcriber(
             model_dir=os.path.join(APP_DIR, self.cfg["model_dir"]),
             num_threads=self.cfg["num_threads"],
@@ -157,29 +235,41 @@ class App:
             vocab_score=self.cfg.get("vocab_score", 2.0),
         )
         mode = f"{len(vocab)} mots boostés (beam search)" if vocab else "aucun (greedy)"
-        print(
-            f"Modèle chargé en {self.stt.load_time:.1f} s — vocabulaire : {mode}",
-            flush=True,
-        )
+        log(f"Modèle chargé en {self.stt.load_time:.1f} s — vocabulaire : {mode}")
 
-    # --- Feedback -----------------------------------------------------------
+    def reload_async(self):
+        """Reconstruit le transcriber (nouveau vocab / score) sans figer l'UI."""
+        def _work():
+            self._set_status("reloading")
+            try:
+                self.load_model()
+                self.on_event("notice", "Vocabulaire rechargé")
+            except Exception as e:
+                log(f"Erreur reload : {e}")
+                self.on_event("notice", f"Erreur rechargement : {e}")
+            finally:
+                self._set_status("ready")
+        threading.Thread(target=_work, daemon=True).start()
+
+    # --- Feedback ------------------------------------------------------------
 
     def beep(self, freq: int, ms: int):
-        if self.cfg["sounds"]:
-            threading.Thread(
-                target=winsound.Beep, args=(freq, ms), daemon=True
-            ).start()
+        if self.cfg.get("sounds", True):
+            threading.Thread(target=winsound.Beep, args=(freq, ms), daemon=True).start()
 
     def set_tray(self, recording: bool):
         if self.icon is not None:
             self.icon.icon = make_icon(recording)
 
-    # --- Enregistrement (push-to-talk + toggle) -----------------------------
+    def _set_status(self, s: str):
+        self.status = s
+        self.on_event("status", s)
+
+    # --- Enregistrement (push-to-talk + toggle) ------------------------------
 
     def _start(self, mode: str):
-        """Démarre un enregistrement. `mode` = "ptt" (maintenu) ou "toggle" (mains-libres)."""
         with self._state_lock:
-            if self.recording or self.busy:
+            if self.recording or self.busy or self.stt is None:
                 return
             self.recording = True
             self.record_mode = mode
@@ -188,43 +278,42 @@ class App:
         self.set_tray(True)
         self.overlay.show_recording()
         self.beep(880, 70)
-        print(f"[debug] start ({mode})", flush=True)
+        self._set_status("recording_toggle" if mode == "toggle" else "recording_ptt")
+        log(f"[debug] start ({mode})")
         if mode == "toggle":
             threading.Thread(target=self._toggle_watchdog, daemon=True).start()
 
     def _stop_and_process(self):
-        """Arrête l'enregistrement en cours et lance la transcription si pertinent."""
         with self._state_lock:
             if not self.recording:
                 return
             self.recording = False
             mode = self.record_mode
             self.record_mode = None
-            self.busy = True  # verrouille tout de suite : pas de nouvel enregistrement
+            self.busy = True
         duration = time.monotonic() - self.record_started_at
         samples = self.recorder.stop()
         self.set_tray(False)
         peak = float(np.abs(samples).max()) if samples.size else 0.0
-        print(
-            f"[debug] stop ({mode}) {duration:.2f}s, {samples.size} éch., pic {peak:.3f}",
-            flush=True,
-        )
+        log(f"[debug] stop ({mode}) {duration:.2f}s, {samples.size} éch., pic {peak:.3f}")
 
         if duration < self.cfg["min_duration_s"] or samples.size == 0:
             self.busy = False
             self.overlay.hide()
+            self._set_status("ready")
             return  # appui accidentel
         if peak < self.cfg.get("min_peak", 0.008):
-            # Quasi-silence : le beam search + vocabulaire boosté peut
-            # halluciner un mot sur du bruit de fond, on n'envoie rien.
+            # Quasi-silence : le beam + vocab boosté peut halluciner sur le bruit.
             self.busy = False
             self.overlay.hide()
             self.beep(300, 150)
+            self._set_status("ready")
             return
         max_samples = int(self.cfg["max_duration_s"] * self.cfg["sample_rate"])
         samples = samples[:max_samples]
 
         self.overlay.show_processing()
+        self._set_status("processing")
         threading.Thread(
             target=self._transcribe_and_paste, args=(samples, duration), daemon=True
         ).start()
@@ -238,22 +327,49 @@ class App:
             if not still_on:
                 return
             if time.monotonic() - self.record_started_at >= limit:
-                print("[debug] toggle : limite de durée atteinte, arrêt auto", flush=True)
+                log("[debug] toggle : limite de durée atteinte, arrêt auto")
                 self.beep(500, 120)
                 self._stop_and_process()
                 return
             time.sleep(0.5)
 
-    # --- Hooks clavier (combo suppressif + touche seule) ---------------------
+    def _apply_corrections(self, text: str) -> str:
+        for rx, replacement in self._corrections:
+            text = rx.sub(replacement, text)
+        return text
+
+    def _transcribe_and_paste(self, samples: np.ndarray, duration: float):
+        try:
+            t0 = time.perf_counter()
+            text = self._apply_corrections(self.stt.transcribe(samples))
+            dt = time.perf_counter() - t0
+            if text:
+                paste_text(text, self.cfg["restore_clipboard"])
+                log(f"[{duration:.1f}s audio → {dt:.2f}s] {text}")
+                self.on_event(
+                    "transcription",
+                    {
+                        "time": time.strftime("%H:%M:%S"),
+                        "text": text,
+                        "audio_s": duration,
+                        "proc_s": dt,
+                    },
+                )
+            else:
+                self.beep(300, 150)  # rien reconnu
+        except Exception as e:
+            log(f"Erreur : {e}")
+            self.beep(200, 300)
+            self.on_event("notice", f"Erreur transcription : {e}")
+        finally:
+            self.busy = False
+            self.overlay.hide()
+            self._set_status("ready")
+
+    # --- Hooks clavier -------------------------------------------------------
 
     def _make_hook(self, trigger: str, entries: list[tuple[list[str], str]]):
-        """Fabrique le hook bloquant du `trigger`, partagé par tous ses combos.
-
-        `entries` = [(modificateurs, mode), …] trié du plus spécifique au plus
-        général (ex. ctrl+shift avant ctrl). Retourner False avale l'événement :
-        indispensable pour l'espace, sinon chaque appui (et l'auto-repeat pendant
-        la dictée) taperait un espace dans l'application active.
-        """
+        """Hook bloquant du `trigger`, partagé par tous ses combos (voir README)."""
 
         def hook(event):
             if event.event_type == "down":
@@ -266,7 +382,6 @@ class App:
                     None,
                 )
                 if self._held.get(trigger):
-                    # auto-repeat : on avale tant qu'un combo est actif / qu'on dicte
                     return False if (active or self.recording) else True
                 self._held[trigger] = True
                 if self.busy:
@@ -282,7 +397,6 @@ class App:
                 elif not self.recording:
                     self._start("toggle")  # 1er appui = début du mains-libres
                 return False
-            # relâchement
             self._held[trigger] = False
             if self.recording and self.record_mode == "ptt":
                 self._stop_and_process()  # PTT : le relâchement arrête
@@ -311,40 +425,13 @@ class App:
         if mode == "ptt" and self.recording and self.record_mode == "ptt":
             self._stop_and_process()
 
-    def _apply_corrections(self, text: str) -> str:
-        for rx, replacement in self._corrections:
-            text = rx.sub(replacement, text)
-        return text
-
-    def _transcribe_and_paste(self, samples: np.ndarray, duration: float):
-        try:
-            t0 = time.perf_counter()
-            text = self._apply_corrections(self.stt.transcribe(samples))
-            dt = time.perf_counter() - t0
-            if text:
-                paste_text(text, self.cfg["restore_clipboard"])
-                print(f"[{duration:.1f}s audio → {dt:.2f}s] {text}", flush=True)
-            else:
-                self.beep(300, 150)  # rien reconnu
-        except Exception as e:
-            print(f"Erreur : {e}", file=sys.stderr, flush=True)
-            self.beep(200, 300)
-        finally:
-            self.busy = False
-            self.overlay.hide()
-
-    # --- Lancement ----------------------------------------------------------
-
-    def run(self):
-        dev = sd.query_devices(kind="input")
-        print(f"[debug] micro : {dev['name']}", flush=True)
-
+    def bind_hotkeys(self):
+        """(Re)installe les hooks depuis la config. Repartir d'une table propre."""
+        keyboard.unhook_all()
+        self._held.clear()
         ptt = self.cfg.get("hotkey", "ctrl+space")
         toggle = self.cfg.get("toggle_hotkey") or None
 
-        # Regroupe les raccourcis par touche de déclenchement : push-to-talk et
-        # toggle peuvent partager le même trigger (ex. « space ») → un seul hook
-        # qui choisit le mode selon les modificateurs réellement enfoncés.
         triggers: dict[str, list[tuple[list[str], str]]] = {}
 
         def add(hk: str, mode: str):
@@ -360,7 +447,6 @@ class App:
             if any(mods for mods, _ in entries):
                 keyboard.hook_key(trig, self._make_hook(trig, entries), suppress=True)
             else:
-                # Touche seule (legacy) : non suppressive pour ne rien avaler.
                 mode = entries[0][1]
                 keyboard.on_press_key(
                     trig, lambda e, m=mode, t=trig: self._single_press(m, t), suppress=False
@@ -368,36 +454,72 @@ class App:
                 keyboard.on_release_key(
                     trig, lambda e, m=mode, t=trig: self._single_release(m, t), suppress=False
                 )
+        log(f"Raccourcis : PTT [{ptt}]" + (f" · toggle [{toggle}]" if toggle else ""))
 
-        toggle_label = f"  ·  toggle [{toggle}]" if toggle else ""
-        menu = pystray.Menu(
-            pystray.MenuItem(
-                f"PersonalWhisper — maintenir [{ptt}]{toggle_label}", None, enabled=False
-            ),
-            pystray.MenuItem("Quitter", self._quit),
+    # --- Réglages (appelés depuis l'UI, thread principal) --------------------
+
+    def apply_settings(self, s: dict):
+        cfg = self.cfg
+        rebind = (
+            s["hotkey"] != cfg.get("hotkey")
+            or (s.get("toggle_hotkey") or None) != (cfg.get("toggle_hotkey") or None)
         )
-        self.icon = pystray.Icon("PersonalWhisper", make_icon(False), "PersonalWhisper", menu)
-        ready = f"Prêt. Maintiens [{ptt}] pour dicter"
-        ready += f", ou [{toggle}] en mains-libres." if toggle else "."
-        print(ready, flush=True)
-        self.beep(660, 60)
-        self.icon.run()  # bloque jusqu'à Quitter
+        device_changed = s.get("device") != cfg.get("device")
+        reload_needed = abs(
+            float(s["vocab_score"]) - float(cfg.get("vocab_score", 2.0))
+        ) > 1e-9
 
-    def _quit(self, icon, _item):
-        keyboard.unhook_all()
-        icon.stop()
-        os._exit(0)
+        cfg["hotkey"] = s["hotkey"]
+        cfg["toggle_hotkey"] = s.get("toggle_hotkey") or None
+        cfg["device"] = s.get("device")
+        cfg["sounds"] = bool(s["sounds"])
+        cfg["restore_clipboard"] = bool(s["restore_clipboard"])
+        cfg["min_peak"] = float(s["min_peak"])
+        cfg["vocab_score"] = float(s["vocab_score"])
+        cfg["overlay"] = bool(s["overlay"])
+        self.overlay.set_enabled(cfg["overlay"])
+        save_config(cfg)
+
+        if rebind:
+            self.bind_hotkeys()
+        if device_changed and not self.recording:
+            try:
+                self.recorder.set_device(cfg["device"])
+            except Exception as e:
+                self.on_event("notice", f"Micro indisponible : {e}")
+        if reload_needed:
+            self.reload_async()
+        else:
+            self.on_event("notice", "Réglages appliqués")
+
+    def save_vocab_text(self, text: str):
+        with open(vocab_path(self.cfg), "w", encoding="utf-8") as f:
+            f.write(text.rstrip("\n") + "\n")
+        self.reload_async()  # le vocab est figé dans le décodeur → rebuild
+
+    def save_corrections(self, corrections: dict):
+        self.cfg["corrections"] = corrections
+        self._corrections = compile_corrections(corrections)
+        save_config(self.cfg)
+        self.on_event("notice", "Corrections enregistrées")
+
+    def shutdown(self):
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
+        if self.icon is not None:
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
 
 
 _SINGLE_INSTANCE_MUTEX = None  # gardé en vie tant que le process tourne
 
 
 def ensure_single_instance():
-    """Empêche une 2e instance (donc un 2e hook clavier qui doublerait l'espace).
-
-    Démarrage auto au login + double-clic sur le raccourci = risque de doublon :
-    un mutex nommé Windows garantit qu'une seule instance vit à la fois.
-    """
+    """Empêche une 2e instance (donc un 2e hook clavier qui doublerait l'espace)."""
     global _SINGLE_INSTANCE_MUTEX
     import ctypes
 
@@ -406,10 +528,53 @@ def ensure_single_instance():
         None, False, "PersonalWhisper_SingleInstance_Mutex"
     )
     if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        print("PersonalWhisper tourne déjà — cette instance se ferme.", flush=True)
+        log("PersonalWhisper tourne déjà — cette instance se ferme.")
         sys.exit(0)
 
 
-if __name__ == "__main__":
+def main():
     ensure_single_instance()
-    App().run()
+    start_in_tray = "--tray" in sys.argv
+    cfg = load_config()
+
+    from ui import MainWindow  # import tardif : app.py reste importable sans display
+
+    window = MainWindow(cfg)
+    overlay = Overlay(master=window, enabled=cfg.get("overlay", True))
+    engine = Engine(cfg, overlay, on_event=window.post_event)
+    window.attach_engine(engine)
+
+    # Tray : menu Ouvrir / Quitter, double-clic = Ouvrir. run_detached car la
+    # boucle principale appartient à tkinter.
+    menu = pystray.Menu(
+        pystray.MenuItem(
+            "Ouvrir PersonalWhisper",
+            lambda icon, item: window.post_event("show", None),
+            default=True,
+        ),
+        pystray.MenuItem("Quitter", lambda icon, item: window.post_event("quit", None)),
+    )
+    icon = pystray.Icon("PersonalWhisper", make_icon(False), "PersonalWhisper", menu)
+    engine.icon = icon
+    icon.run_detached()
+
+    def _boot():
+        try:
+            engine.load_model()
+            engine.bind_hotkeys()
+            engine.beep(660, 60)
+            window.post_event("status", "ready")
+            window.post_event("model_ready", None)
+        except Exception as e:
+            log(f"Erreur au démarrage : {e}")
+            window.post_event("notice", f"Erreur démarrage : {e}")
+
+    threading.Thread(target=_boot, daemon=True).start()
+
+    if start_in_tray:
+        window.withdraw()
+    window.mainloop()
+
+
+if __name__ == "__main__":
+    main()

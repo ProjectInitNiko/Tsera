@@ -8,16 +8,21 @@ Dictée vocale locale push-to-talk pour Windows — clone maison de SuperWhisper
 
 L'espace est avalé tant que Ctrl est enfoncé : pas d'espaces parasites tapés dans l'app active pendant la dictée.
 
+## Interface
+
+Une fenêtre (customtkinter, thème sombre « NK ») donne : le **statut live**
+(Prêt / Écoute / Transcription), l'**historique des dictées** (avec copie), et des
+**réglages éditables** — raccourcis, micro, sons, HUD, sensibilité, force du
+vocabulaire — plus des **éditeurs de vocabulaire et de corrections**. Fermer la
+fenêtre la **réduit dans la barre système** (l'app continue d'écouter) ; l'icône
+tray propose *Ouvrir* / *Quitter*.
+
 ## Lancer
 
 ```
-.venv\Scripts\python.exe app.py
-```
-
-Sans console (tray uniquement) :
-
-```
-.venv\Scripts\pythonw.exe app.py
+.venv\Scripts\python.exe app.py          # fenêtre + console (logs de debug)
+.venv\Scripts\pythonw.exe app.py         # fenêtre, sans console
+.venv\Scripts\pythonw.exe app.py --tray  # démarre réduit dans le tray (login)
 ```
 
 ## Config (`config.json`)
@@ -34,6 +39,7 @@ Sans console (tray uniquement) :
 | `sounds` | `true` | Bips de feedback (début / erreur) |
 | `restore_clipboard` | `true` | Restaure le presse-papiers après collage |
 | `overlay` | `true` | HUD « NK » + vagues de son en bas d'écran pendant la dictée |
+| `device` | `null` (absent) | Index du micro (voir la liste dans Réglages) ; `null`/absent = défaut système |
 | `vocab_file` | `vocab.txt` | Vocabulaire custom (un mot/expression par ligne, `#` = commentaire) |
 | `vocab_score` | `2.0` | Force du biasing (validé : 2 = doux, 4 = fort, 8 = le mot s'invite partout) |
 | `corrections` | `{...}` | Remplacements post-transcription, insensibles à la casse, mots entiers (casse finale + cafouillages connus) |
@@ -60,9 +66,10 @@ dossier du modèle pour encoder les hotwords — biasing vérifié effectif avec
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-Crée un **raccourci sur le Bureau** (`PersonalWhisper`, icône « NK », lance en
-tray sans console via `pythonw.exe`) **et** un raccourci dans `shell:startup`
-pour le **démarrage automatique à chaque login Windows**. Options :
+Crée un **raccourci sur le Bureau** (`PersonalWhisper`, icône « NK », ouvre la
+fenêtre) **et** un raccourci dans `shell:startup` pour le **démarrage automatique
+à chaque login Windows** (avec `--tray` : démarre réduit, sans ouvrir la fenêtre).
+Les deux lancent via `pythonw.exe` (aucune console). Options :
 
 - `install.ps1 -NoStartup` — Bureau seulement, pas de démarrage auto
 - `install.ps1 -Uninstall` — retire les deux raccourcis
@@ -77,7 +84,7 @@ Clic droit sur l'icône de la barre système → **Quitter**.
 
 ```
 python -m venv .venv
-.venv\Scripts\pip install sherpa-onnx sounddevice numpy keyboard pyperclip pystray pillow
+.venv\Scripts\pip install sherpa-onnx sounddevice numpy keyboard pyperclip pystray pillow customtkinter
 curl.exe -L --ssl-no-revoke -o parakeet-v3-int8.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 tar -xjf parakeet-v3-int8.tar.bz2
 ```
@@ -91,3 +98,4 @@ tar -xjf parakeet-v3-int8.tar.bz2
       le moment venu (API Haiku ~0,1 ¢/usage vs Ollama local gratuit mais lent CPU)
 - [x] Vocabulaire custom (noms propres : PERSEUS, Mecazic, GHL…) — hotwords + corrections
 - [x] Toggle mains-libres (Ctrl+Shift+Espace) en plus du push-to-talk
+- [x] Interface (statut, historique, réglages, éditeurs vocab/corrections) + réduction au tray

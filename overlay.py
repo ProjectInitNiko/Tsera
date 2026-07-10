@@ -1,15 +1,16 @@
 """HUD à la SuperWhisper — pastille en bas d'écran avec « NK » + vagues de son.
 
-Tourne dans son propre thread tkinter ; les autres threads ne font que poser
-des drapeaux (`_state`) et empiler des niveaux audio (`push_level`), le thread
-UI lit tout ça à ~30 fps. Fenêtre sans bordure, topmost, et surtout
-WS_EX_NOACTIVATE : elle ne vole jamais le focus de l'app où l'on dicte.
+Rendu comme un `Toplevel` de la fenêtre principale : le HUD partage la boucle
+tkinter du thread principal (pas de second root Tk concurrent). Les autres
+threads ne font que poser des drapeaux (`_state`) et empiler des niveaux audio
+(`push_level`) ; le thread UI lit tout ça à ~30 fps via `after`. Fenêtre sans
+bordure, topmost, et surtout WS_EX_NOACTIVATE : elle ne vole jamais le focus de
+l'app où l'on dicte.
 """
 
 import collections
 import ctypes
 import math
-import threading
 import time
 import tkinter as tk
 
@@ -36,25 +37,41 @@ def _round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kw):
 
 
 class Overlay:
-    """États : hidden → recording (vagues) → processing (points) → hidden."""
+    """États : hidden → recording (vagues) → processing (points) → hidden.
 
-    def __init__(self, enabled: bool = True):
+    Toujours construit (fenêtre cachée) ; l'affichage est conditionné par
+    `_enabled`, qu'on peut basculer à chaud depuis les réglages.
+    """
+
+    def __init__(self, master, enabled: bool = True):
         self._state = "hidden"
         self._levels = collections.deque(maxlen=_N_BARS)
         self._enabled = enabled
         self._visible = False
-        if enabled:
-            ready = threading.Event()
-            threading.Thread(target=self._run, args=(ready,), daemon=True).start()
-            ready.wait(5)
+        self._root = None
+        self._canvas = None
+        self._build(master)
 
     # --- API (thread-safe, appelable de n'importe où) -------------------------
 
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = enabled
+        if not enabled:
+            self._state = "hidden"
+
     def show_recording(self):
+        if not self._enabled:
+            return
         self._levels.clear()
         self._state = "recording"
 
     def show_processing(self):
+        if not self._enabled:
+            return
         self._state = "processing"
 
     def hide(self):
@@ -64,10 +81,10 @@ class Overlay:
         """rms du dernier chunk micro (float32 [-1,1]) → niveau de barre [0,1]."""
         self._levels.append(min(1.0, (rms * 14) ** 0.6))
 
-    # --- Thread UI -------------------------------------------------------------
+    # --- Construction + boucle (thread principal) -----------------------------
 
-    def _run(self, ready: threading.Event):
-        root = tk.Tk()
+    def _build(self, master):
+        root = tk.Toplevel(master)
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", _TRANSPARENT)
@@ -109,11 +126,11 @@ class Overlay:
         root.attributes("-alpha", 1.0)
 
         self._root, self._canvas = root, canvas
-        ready.set()
         self._tick()
-        root.mainloop()
 
     def _tick(self):
+        if self._root is None:
+            return
         state = self._state
         if state == "hidden":
             if self._visible:
