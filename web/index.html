@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PersonalWhisper</title>
+  <link rel="stylesheet" href="fonts.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- Faceplate : barre de titre custom (draggable) -->
+    <header class="titlebar pywebview-drag-region">
+      <div class="brand">
+        <span class="nk">NK</span>
+        <span class="wordmark">Personal<b>Whisper</b></span>
+      </div>
+      <div class="winctl">
+        <button id="min" class="winbtn" title="Réduire dans la barre système" aria-label="Réduire">
+          <svg viewBox="0 0 12 12"><line x1="2" y1="6.5" x2="10" y2="6.5" /></svg>
+        </button>
+        <button id="close" class="winbtn winbtn--close" title="Réduire dans la barre système" aria-label="Fermer">
+          <svg viewBox="0 0 12 12"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5" /><line x1="9.5" y1="2.5" x2="2.5" y2="9.5" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Signal : le hero. Statut + forme d'onde vivante + raccourcis -->
+    <section class="signal glass">
+      <div class="signal__row">
+        <span id="led" class="led led--amber"></span>
+        <span id="statusWord" class="status-word">Démarrage</span>
+        <span id="rec" class="rec" hidden>REC</span>
+      </div>
+      <canvas id="wave" class="wave"></canvas>
+      <div class="keys">
+        <span class="keys__label">maintenir</span>
+        <span id="pttKeys" class="keycaps"></span>
+        <span class="keys__dot">·</span>
+        <span class="keys__label">mains-libres</span>
+        <span id="toggleKeys" class="keycaps"></span>
+      </div>
+    </section>
+
+    <!-- Sélecteur de canal -->
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="historique" role="tab">Historique</button>
+      <button class="tab" data-tab="reglages" role="tab">Réglages</button>
+      <button class="tab" data-tab="vocabulaire" role="tab">Vocabulaire</button>
+      <button class="tab" data-tab="corrections" role="tab">Corrections</button>
+      <span class="tabs__ink" aria-hidden="true"></span>
+    </nav>
+
+    <main class="panels">
+
+      <!-- Historique -->
+      <section class="panel is-active" data-panel="historique">
+        <div class="panel__head">
+          <span class="panel__title">Prises <em id="histCount">0</em></span>
+          <button id="clearHist" class="linkbtn">Effacer</button>
+        </div>
+        <div id="history" class="history">
+          <div id="histEmpty" class="empty">
+            <span class="empty__mark">◟◜</span>
+            <span>Aucune prise pour l'instant.<br />Maintiens <b>Ctrl + Espace</b> et parle.</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Réglages -->
+      <section class="panel" data-panel="reglages">
+        <div class="form">
+          <label class="field">
+            <span class="field__label">Raccourci push-to-talk</span>
+            <input id="ptt" class="input input--mono" type="text" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field__label">Raccourci mains-libres (toggle)</span>
+            <input id="toggle" class="input input--mono" type="text" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="field__label">Microphone</span>
+            <div class="select">
+              <select id="device"></select>
+              <svg class="select__chevron" viewBox="0 0 12 8"><path d="M1 1.5 6 6.5 11 1.5" /></svg>
+            </div>
+          </label>
+
+          <div class="switches">
+            <label class="switch"><input id="sounds" type="checkbox" /><span class="switch__track"></span><span class="switch__label">Sons de feedback</span></label>
+            <label class="switch"><input id="overlay" type="checkbox" /><span class="switch__track"></span><span class="switch__label">HUD à l'écran pendant la dictée</span></label>
+            <label class="switch"><input id="restore" type="checkbox" /><span class="switch__track"></span><span class="switch__label">Restaurer le presse-papiers</span></label>
+          </div>
+
+          <div class="field field--slider">
+            <div class="field__head"><span class="field__label">Sensibilité au silence</span><span id="peakVal" class="readout">0.008</span></div>
+            <input id="peak" class="range" type="range" min="0.002" max="0.05" step="0.001" />
+          </div>
+          <div class="field field--slider">
+            <div class="field__head"><span class="field__label">Force du vocabulaire</span><span id="scoreVal" class="readout">2.0</span></div>
+            <input id="score" class="range" type="range" min="0" max="8" step="0.5" />
+            <span class="hint">2 = doux · 4 = fort · 8 = le mot s'invite partout. Changer la force ou le micro applique après un court rechargement.</span>
+          </div>
+
+          <button id="applySettings" class="btn btn--amber">Appliquer les réglages</button>
+        </div>
+      </section>
+
+      <!-- Vocabulaire -->
+      <section class="panel" data-panel="vocabulaire">
+        <p class="hint hint--top">Un mot ou nom propre par ligne · <b>#</b> = commentaire. Ces mots sont boostés à la transcription.</p>
+        <textarea id="vocab" class="textarea" spellcheck="false"></textarea>
+        <button id="saveVocab" class="btn btn--amber">Enregistrer &amp; recharger</button>
+      </section>
+
+      <!-- Corrections -->
+      <section class="panel" data-panel="corrections">
+        <p class="hint hint--top">Une correction par ligne : <b>erreur = remplacement</b> (insensible à la casse, mots entiers). Appliqué instantanément.</p>
+        <textarea id="corr" class="textarea" spellcheck="false"></textarea>
+        <button id="saveCorr" class="btn btn--amber">Enregistrer les corrections</button>
+      </section>
+
+    </main>
+
+    <footer class="foot">
+      <span class="foot__brand">100&nbsp;% local · Parakeet&nbsp;v3 · offline</span>
+      <button id="quit" class="foot__quit">Quitter</button>
+    </footer>
+
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

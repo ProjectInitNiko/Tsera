@@ -537,22 +537,35 @@ def main():
     start_in_tray = "--tray" in sys.argv
     cfg = load_config()
 
-    from ui import MainWindow  # import tardif : app.py reste importable sans display
+    import webview  # import tardif : app.py reste importable sans backend GUI
+    from webui import Api
 
-    window = MainWindow(cfg)
-    overlay = Overlay(master=window, enabled=cfg.get("overlay", True))
-    engine = Engine(cfg, overlay, on_event=window.post_event)
-    window.attach_engine(engine)
+    overlay = Overlay(enabled=cfg.get("overlay", True))  # HUD : root Tk dédié (thread)
+    api = Api(cfg)
+    engine = Engine(cfg, overlay, on_event=api._emit)
 
-    # Tray : menu Ouvrir / Quitter, double-clic = Ouvrir. run_detached car la
-    # boucle principale appartient à tkinter.
+    window = webview.create_window(
+        "PersonalWhisper",
+        url=os.path.join(APP_DIR, "web", "index.html"),
+        js_api=api,
+        width=640,
+        height=800,
+        min_size=(560, 680),
+        background_color="#14110D",
+        frameless=True,
+        easy_drag=False,   # drag seulement via .pywebview-drag-region (la barre de titre)
+        resizable=True,
+        hidden=start_in_tray,
+    )
+    api._attach(engine, window)
+
+    # Tray : menu Ouvrir / Quitter (double-clic = Ouvrir). run_detached car la
+    # boucle principale appartient à webview.
     menu = pystray.Menu(
         pystray.MenuItem(
-            "Ouvrir PersonalWhisper",
-            lambda icon, item: window.post_event("show", None),
-            default=True,
+            "Ouvrir PersonalWhisper", lambda i, it: window.show(), default=True
         ),
-        pystray.MenuItem("Quitter", lambda icon, item: window.post_event("quit", None)),
+        pystray.MenuItem("Quitter", lambda i, it: api.quit_app()),
     )
     icon = pystray.Icon("PersonalWhisper", make_icon(False), "PersonalWhisper", menu)
     engine.icon = icon
@@ -563,17 +576,17 @@ def main():
             engine.load_model()
             engine.bind_hotkeys()
             engine.beep(660, 60)
-            window.post_event("status", "ready")
-            window.post_event("model_ready", None)
+            api._emit("status", "ready")
+            api._emit("model_ready", None)
         except Exception as e:
             log(f"Erreur au démarrage : {e}")
-            window.post_event("notice", f"Erreur démarrage : {e}")
+            api._emit("notice", f"Erreur démarrage : {e}")
 
     threading.Thread(target=_boot, daemon=True).start()
 
-    if start_in_tray:
-        window.withdraw()
-    window.mainloop()
+    webview.start(gui="edgechromium", debug=False)  # bloque jusqu'à destruction
+    engine.shutdown()
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -1,25 +1,26 @@
 """HUD à la SuperWhisper — pastille en bas d'écran avec « NK » + vagues de son.
 
-Rendu comme un `Toplevel` de la fenêtre principale : le HUD partage la boucle
-tkinter du thread principal (pas de second root Tk concurrent). Les autres
-threads ne font que poser des drapeaux (`_state`) et empiler des niveaux audio
-(`push_level`) ; le thread UI lit tout ça à ~30 fps via `after`. Fenêtre sans
-bordure, topmost, et surtout WS_EX_NOACTIVATE : elle ne vole jamais le focus de
-l'app où l'on dicte.
+Tourne dans son propre thread tkinter (root Tk dédié) : la fenêtre principale
+est en WebView2 (pywebview), pas en tkinter, donc le HUD est indépendant. Les
+autres threads ne font que poser des drapeaux (`_state`) et empiler des niveaux
+audio (`push_level`) ; le thread UI lit tout ça à ~30 fps. Fenêtre sans bordure,
+topmost, et surtout WS_EX_NOACTIVATE : elle ne vole jamais le focus de l'app où
+l'on dicte.
 """
 
 import collections
 import ctypes
 import math
+import threading
 import time
 import tkinter as tk
 
 # Couleur-clé rendue transparente (ne jamais l'utiliser dans le dessin).
 _TRANSPARENT = "#010203"
 
-_PILL_BG = "#17171B"
-_PILL_BORDER = "#2E2E36"
-_BAR_COLOR = "#EDEDF2"
+_PILL_BG = "#17140F"
+_PILL_BORDER = "#332C22"
+_BAR_COLOR = "#FFC96B"
 _ACCENT = "#FFAA2B"
 
 _W, _H = 300, 56
@@ -39,18 +40,20 @@ def _round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kw):
 class Overlay:
     """États : hidden → recording (vagues) → processing (points) → hidden.
 
-    Toujours construit (fenêtre cachée) ; l'affichage est conditionné par
-    `_enabled`, qu'on peut basculer à chaud depuis les réglages.
+    Construit dans son thread ; l'affichage est conditionné par `_enabled`,
+    qu'on peut basculer à chaud depuis les réglages.
     """
 
-    def __init__(self, master, enabled: bool = True):
+    def __init__(self, enabled: bool = True):
         self._state = "hidden"
         self._levels = collections.deque(maxlen=_N_BARS)
         self._enabled = enabled
         self._visible = False
         self._root = None
         self._canvas = None
-        self._build(master)
+        ready = threading.Event()
+        threading.Thread(target=self._run, args=(ready,), daemon=True).start()
+        ready.wait(5)
 
     # --- API (thread-safe, appelable de n'importe où) -------------------------
 
@@ -81,10 +84,10 @@ class Overlay:
         """rms du dernier chunk micro (float32 [-1,1]) → niveau de barre [0,1]."""
         self._levels.append(min(1.0, (rms * 14) ** 0.6))
 
-    # --- Construction + boucle (thread principal) -----------------------------
+    # --- Thread UI ------------------------------------------------------------
 
-    def _build(self, master):
-        root = tk.Toplevel(master)
+    def _run(self, ready: threading.Event):
+        root = tk.Tk()
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.attributes("-transparentcolor", _TRANSPARENT)
@@ -126,11 +129,11 @@ class Overlay:
         root.attributes("-alpha", 1.0)
 
         self._root, self._canvas = root, canvas
+        ready.set()
         self._tick()
+        root.mainloop()
 
     def _tick(self):
-        if self._root is None:
-            return
         state = self._state
         if state == "hidden":
             if self._visible:
@@ -153,7 +156,6 @@ class Overlay:
         cy = _H // 2
         step = (_BARS_X1 - _BARS_X0) / (_N_BARS - 1)
         levels = list(self._levels)
-        # Les plus récents à droite ; à gauche, du « plat » tant que ça se remplit.
         levels = [0.0] * (_N_BARS - len(levels)) + levels
         for i, lvl in enumerate(levels):
             x = _BARS_X0 + i * step

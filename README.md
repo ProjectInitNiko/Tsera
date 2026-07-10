@@ -10,12 +10,19 @@ L'espace est avalé tant que Ctrl est enfoncé : pas d'espaces parasites tapés 
 
 ## Interface
 
-Une fenêtre (customtkinter, thème sombre « NK ») donne : le **statut live**
-(Prêt / Écoute / Transcription), l'**historique des dictées** (avec copie), et des
-**réglages éditables** — raccourcis, micro, sons, HUD, sensibilité, force du
-vocabulaire — plus des **éditeurs de vocabulaire et de corrections**. Fermer la
-fenêtre la **réduit dans la barre système** (l'app continue d'écouter) ; l'icône
-tray propose *Ouvrir* / *Quitter*.
+Fenêtre **web embarquée** (pywebview / WebView2), identité « matériel de studio »
+(charbon + ambre signal + rouge VU, Anton / Inter / IBM Plex Mono). Elle donne :
+le **statut live** avec une **forme d'onde** qui réagit à l'état (repos / écoute /
+transcription), l'**historique des dictées** (avec copie), des **réglages
+éditables** (raccourcis, micro, sons, HUD, sensibilité, force du vocabulaire) et
+des **éditeurs de vocabulaire et de corrections**. Fermer la fenêtre la **réduit
+dans la barre système** (l'app continue d'écouter) ; l'icône tray propose
+*Ouvrir* / *Quitter*.
+
+Le front vit dans `web/` (`index.html` + `style.css` + `app.js`), piloté par le
+moteur Python via le bridge `webui.py`. Les polices sont embarquées en data-URI
+dans `web/fonts.css` (généré par `build_fonts_css.py` — évite le blocage CORS des
+woff2 sous `file://`).
 
 ## Lancer
 
@@ -84,7 +91,7 @@ Clic droit sur l'icône de la barre système → **Quitter**.
 
 ```
 python -m venv .venv
-.venv\Scripts\pip install sherpa-onnx sounddevice numpy keyboard pyperclip pystray pillow customtkinter
+.venv\Scripts\pip install sherpa-onnx sounddevice numpy keyboard pyperclip pystray pillow pywebview
 curl.exe -L --ssl-no-revoke -o parakeet-v3-int8.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 tar -xjf parakeet-v3-int8.tar.bz2
 ```
