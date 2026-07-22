@@ -23,9 +23,27 @@ _PILL_BORDER = "#332C22"
 _BAR_COLOR = "#FFC96B"
 _ACCENT = "#FFAA2B"
 
-_W, _H = 300, 56
+_ORB = 46                      # diamètre de l'orbe d'état, à droite des ondes
+_H = 56
+_BARS_X0, _BARS_X1 = 66, 276   # les ondes gardent leur place d'origine
+_W = _BARS_X1 + 12 + _ORB + 20  # … la pastille s'allonge pour loger l'orbe
+_ORB_CX = _BARS_X1 + 12 + _ORB // 2
 _N_BARS = 26
-_BARS_X0, _BARS_X1 = 66, _W - 24
+
+# Teinte des orbes : (23, 20, 15) = _PILL_BG, (255, 201, 107) = _BAR_COLOR.
+_ORB_RGB = (255, 201, 107)
+_PILL_RGB = (23, 20, 15)
+
+# Orbes d'état : agrément visuel, jamais un point de panne. Si PIL ou le module
+# manquent, le HUD retombe sur les ondes et les points seuls.
+try:
+    from PIL import Image, ImageTk
+
+    from orbs import OrbRenderer
+
+    _ORBS_OK = True
+except Exception:  # pragma: no cover - dépend de l'environnement
+    _ORBS_OK = False
 
 
 def _round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kw):
@@ -51,6 +69,8 @@ class Overlay:
         self._visible = False
         self._root = None
         self._canvas = None
+        self._orb_photo = None
+        self._orb_renderers = {}
         ready = threading.Event()
         threading.Thread(target=self._run, args=(ready,), daemon=True).start()
         ready.wait(5)
@@ -110,6 +130,24 @@ class Overlay:
             font=("Segoe UI", 15, "bold"),
         )
 
+        # Orbe d'état : une seule PhotoImage réutilisée (paste par frame) plutôt
+        # qu'une allocation à chaque tick. La référence doit rester vivante,
+        # sinon le ramasse-miettes la retire sous les pieds de Tk.
+        self._orb_photo = None
+        self._orb_renderers = {}
+        if _ORBS_OK:
+            try:
+                self._orb_renderers = {
+                    "recording": OrbRenderer("wave", _ORB, _ORB_RGB, _PILL_RGB),
+                    "processing": OrbRenderer("ribbon", _ORB, _ORB_RGB, _PILL_RGB),
+                }
+                self._orb_photo = ImageTk.PhotoImage(
+                    Image.new("RGB", (_ORB, _ORB), _PILL_RGB)
+                )
+                canvas.create_image(_ORB_CX, _H // 2, image=self._orb_photo)
+            except Exception:
+                self._orb_photo = None
+
         # Mapper une fois (invisible via alpha 0) pour obtenir un HWND stable,
         # puis poser WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW : pas de vol de focus,
         # pas d'entrée dans Alt-Tab.
@@ -149,7 +187,20 @@ class Overlay:
                 self._draw_bars()
             else:
                 self._draw_dots()
+            self._draw_orb(state)
         self._root.after(33, self._tick)
+
+    def _draw_orb(self, state: str):
+        """« listening » pendant la dictée, « composing » pendant la transcription."""
+        if self._orb_photo is None:
+            return
+        renderer = self._orb_renderers.get(state)
+        if renderer is None:
+            return
+        try:
+            self._orb_photo.paste(renderer.render(time.monotonic()))
+        except Exception:
+            self._orb_photo = None  # on n'insiste pas : le HUD continue sans orbe
 
     def _draw_bars(self):
         c = self._canvas
