@@ -2,8 +2,11 @@
   "hotkey": "ctrl+space",
   "toggle_hotkey": "ctrl+shift+space",
   "model_dir": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+  "model_dir_ka": "sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc",
+  "dictation_lang": "multi",
   "num_threads": 4,
   "sample_rate": 16000,
+  "device": null,
   "min_duration_s": 0.3,
   "max_duration_s": 120,
   "min_peak": 0.008,
@@ -19,8 +22,8 @@
     "mecazic": "Mecazic",
     "meccazic": "Mecazic",
     "mékazic": "Mecazic",
-    "megazik": "Mégazik",
-    "méga zik": "Mégazik",
+    "megazik": "Mecazic",
+    "méga zik": "Mecazic",
     "adomeos": "Adomeos",
     "adoméos": "Adomeos",
     "g h l": "GHL",
@@ -30,7 +33,7 @@
     "supmeca": "Supméca",
     "supabase": "Supabase",
     "livekit": "LiveKit",
-    "live kit": "LiveKit",
-    "okan": "Okan"
-  }
+    "live kit": "LiveKit"
+  },
+  "lang": "en"
 }

@@ -2,3 +2,4 @@
 __pycache__/
 *.tar.bz2
 sherpa-onnx-nemo-parakeet-*/
+sherpa-onnx-stt_ka_*/

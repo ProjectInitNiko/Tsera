@@ -11,7 +11,7 @@ L'espace est avalé tant que Ctrl est enfoncé : pas d'espaces parasites tapés 
 ## Interface
 
 Fenêtre **web embarquée** (pywebview / WebView2), identité « matériel de studio »
-(charbon + ambre signal + rouge VU, Anton / Inter / IBM Plex Mono). Elle donne :
+(charbon + ambre signal + rouge VU, Anton / Inter / Roboto Mono). Elle donne :
 le **statut live** avec une **forme d'onde** qui réagit à l'état (repos / écoute /
 transcription), l'**historique des dictées** (avec copie), des **réglages
 éditables** (raccourcis, micro, sons, HUD, sensibilité, force du vocabulaire) et
@@ -97,6 +97,53 @@ tar -xjf parakeet-v3-int8.tar.bz2
 ```
 
 (`--ssl-no-revoke` : nécessaire avec Avast, son certificat MITM n'a pas d'info de révocation.)
+
+Le `tar` de Windows ne sait pas décompresser le bzip2 (« unable to run program "bzip2 -d" ») :
+`python -c "import tarfile; t=tarfile.open('parakeet-v3-int8.tar.bz2','r:bz2'); t.extractall('.')"`.
+
+## Langue de dictée
+
+Deux modèles, choisis dans **Réglages → Langue de dictée** ; en changer recharge
+le modèle (quelques secondes). Parakeet reste le défaut.
+
+| | Parakeet-tdt-0.6b-v3 (défaut) | Géorgien |
+| --- | --- | --- |
+| Couverture | 25 langues européennes | ქართული uniquement |
+| Poids | 641 Mo (int8) | 477 Mo (fp32) |
+| Chargement | ~12 s | ~16 s |
+| Vocabulaire custom | oui | non (voir plus bas) |
+
+Le modèle géorgien est **[`nvidia/stt_ka_fastconformer_hybrid_large_pc`](https://huggingface.co/nvidia/stt_ka_fastconformer_hybrid_large_pc)**
+(NVIDIA, **licence CC-BY-4.0**, ~115 M paramètres, entraîné sur ~163 h de Common
+Voice 17 + Fleurs), dans l'export ONNX de
+[LukeJacob2023](https://huggingface.co/LukeJacob2023/sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc).
+Même famille que Parakeet (NeMo transducer) : il se charge par le même chemin.
+
+WER annoncé : **5,73 %** sur le test Common Voice, **13,44 %** sur Fleurs. Le
+second est le plus représentatif d'une dictée réelle — sensiblement moins bon que
+le français, 163 h d'entraînement seulement.
+
+Le **vocabulaire custom ne s'applique pas** en géorgien : il est écrit en alphabet
+latin, pour lequel ce modèle n'a aucun token. Le biasing n'aurait rien à quoi
+s'accrocher, il est donc désactivé dans ce mode.
+
+Installation (le dossier est hors dépôt, comme les autres modèles) :
+
+```
+mkdir sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc
+cd sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc
+curl.exe -L --ssl-no-revoke -O https://huggingface.co/LukeJacob2023/sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc/resolve/main/encoder.onnx
+curl.exe -L --ssl-no-revoke -O https://huggingface.co/LukeJacob2023/sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc/resolve/main/decoder.onnx
+curl.exe -L --ssl-no-revoke -O https://huggingface.co/LukeJacob2023/sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc/resolve/main/joiner.onnx
+curl.exe -L --ssl-no-revoke -O https://huggingface.co/LukeJacob2023/sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc/resolve/main/tokens.txt
+```
+
+Sans ce dossier, l'option reste grisée dans les réglages.
+
+## Crédits
+
+- **Modèle géorgien** : NVIDIA `stt_ka_fastconformer_hybrid_large_pc`, licence [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Orbes d'état** (`orbs.py`, `web/orbs.js`) : portage de [thinking-orbs](https://github.com/Jakubantalik/thinking-orbs) de Jakub Antalik, licence MIT — notice complète en tête de chaque fichier.
 
 ## Roadmap
 

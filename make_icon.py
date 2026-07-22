@@ -21,7 +21,9 @@ def _font(size: int):
     return ImageFont.load_default()
 
 
-def render(px: int) -> Image.Image:
+def render(px: int, fg=AMBER) -> Image.Image:
+    """Pastille « NK ». `fg` colore le sigle : la barre système réutilise ce
+    dessin en rouge pendant l'enregistrement plutôt que d'en avoir un autre."""
     img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     pad = max(1, round(px * 0.06))
@@ -36,7 +38,7 @@ def render(px: int) -> Image.Image:
         ((px - tw) / 2 - box[0], (px - th) / 2 - box[1]),
         text,
         font=font,
-        fill=AMBER,
+        fill=fg,
     )
     return img
 

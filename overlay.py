@@ -11,6 +11,7 @@ l'on dicte.
 import collections
 import ctypes
 import math
+import os
 import threading
 import time
 import tkinter as tk
@@ -37,7 +38,7 @@ _PILL_RGB = (23, 20, 15)
 # Orbes d'état : agrément visuel, jamais un point de panne. Si PIL ou le module
 # manquent, le HUD retombe sur les ondes et les points seuls.
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageDraw, ImageFont, ImageTk
 
     from orbs import OrbRenderer
 
@@ -125,10 +126,29 @@ class Overlay:
             canvas, 1, 1, _W - 2, _H - 2, _H // 2 - 1,
             fill=_PILL_BG, outline=_PILL_BORDER, width=1,
         )
-        canvas.create_text(
-            36, _H // 2, text="NK", fill=_ACCENT,
-            font=("Segoe UI", 15, "bold"),
-        )
+        # Le sigle est peint par PIL, pas par tkinter : aucune des polices de la
+        # maison n'est installée sur le système, et tkinter ne sait charger
+        # qu'une police installée — il retombait donc sur Segoe UI, la police par
+        # défaut de Windows, qu'on ne veut nulle part. PIL, lui, lit un fichier.
+        self._nk_photo = None
+        if _ORBS_OK:
+            try:
+                font = ImageFont.truetype(
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "assets", "inter-600.ttf"), 19)
+                im = Image.new("RGB", (44, _H), _PILL_RGB)
+                dr = ImageDraw.Draw(im)
+                box = dr.textbbox((0, 0), "NK", font=font)
+                dr.text(((44 - (box[2] - box[0])) / 2 - box[0],
+                         (_H - (box[3] - box[1])) / 2 - box[1]),
+                        "NK", font=font, fill=_ACCENT)
+                self._nk_photo = ImageTk.PhotoImage(im)
+                canvas.create_image(36, _H // 2, image=self._nk_photo)
+            except Exception:
+                self._nk_photo = None
+        if self._nk_photo is None:  # filet : mieux vaut un sigle que pas de sigle
+            canvas.create_text(36, _H // 2, text="NK", fill=_ACCENT,
+                               font=("Arial", 15, "bold"))
 
         # Orbe d'état : une seule PhotoImage réutilisée (paste par frame) plutôt
         # qu'une allocation à chaque tick. La référence doit rester vivante,

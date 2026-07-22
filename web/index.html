@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -17,10 +17,16 @@
         <span class="wordmark">Personal<b>Whisper</b></span>
       </div>
       <div class="winctl">
-        <button id="min" class="winbtn" title="Réduire dans la barre système" aria-label="Réduire">
+        <button id="min" class="winbtn" data-i18n-title="tt_min" data-i18n-aria="aria_min"
+                title="Minimise to the system tray" aria-label="Minimise">
           <svg viewBox="0 0 12 12"><line x1="2" y1="6.5" x2="10" y2="6.5" /></svg>
         </button>
-        <button id="close" class="winbtn winbtn--close" title="Réduire dans la barre système" aria-label="Fermer">
+        <button id="max" class="winbtn" data-i18n-title="tt_max" data-i18n-aria="aria_max"
+                title="Maximise · double-click the bar · F11 = full screen" aria-label="Maximise">
+          <svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1.5" /></svg>
+        </button>
+        <button id="close" class="winbtn winbtn--close" data-i18n-title="tt_close" data-i18n-aria="aria_close"
+                title="Minimise to the system tray" aria-label="Close">
           <svg viewBox="0 0 12 12"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5" /><line x1="9.5" y1="2.5" x2="2.5" y2="9.5" /></svg>
         </button>
       </div>
@@ -30,25 +36,27 @@
     <section class="signal glass">
       <div class="signal__row">
         <span id="led" class="led led--amber"></span>
-        <span id="statusWord" class="status-word">Démarrage</span>
+        <span id="statusWord" class="status-word" data-i18n="st_starting">Starting</span>
+        <span class="signal__gap" aria-hidden="true"></span>
         <span id="rec" class="rec" hidden>REC</span>
+        <canvas id="stateOrb" class="state-orb" aria-hidden="true"></canvas>
       </div>
       <canvas id="wave" class="wave"></canvas>
       <div class="keys">
-        <span class="keys__label">maintenir</span>
+        <span class="keys__label" data-i18n="keys_hold">hold</span>
         <span id="pttKeys" class="keycaps"></span>
         <span class="keys__dot">·</span>
-        <span class="keys__label">mains-libres</span>
+        <span class="keys__label" data-i18n="keys_handsfree">hands-free</span>
         <span id="toggleKeys" class="keycaps"></span>
       </div>
     </section>
 
     <!-- Sélecteur de canal -->
     <nav class="tabs" role="tablist">
-      <button class="tab is-active" data-tab="historique" role="tab">Historique</button>
-      <button class="tab" data-tab="reglages" role="tab">Réglages</button>
-      <button class="tab" data-tab="vocabulaire" role="tab">Vocabulaire</button>
-      <button class="tab" data-tab="corrections" role="tab">Corrections</button>
+      <button class="tab is-active" data-tab="historique" role="tab" data-i18n="tab_history">History</button>
+      <button class="tab" data-tab="reglages" role="tab" data-i18n="tab_settings">Settings</button>
+      <button class="tab" data-tab="vocabulaire" role="tab" data-i18n="tab_vocab">Vocabulary</button>
+      <button class="tab" data-tab="corrections" role="tab" data-i18n="tab_corr">Corrections</button>
       <span class="tabs__ink" aria-hidden="true"></span>
     </nav>
 
@@ -57,13 +65,13 @@
       <!-- Historique -->
       <section class="panel is-active" data-panel="historique">
         <div class="panel__head">
-          <span class="panel__title">Prises <em id="histCount">0</em></span>
-          <button id="clearHist" class="linkbtn">Effacer</button>
+          <span class="panel__title"><span data-i18n="hist_takes">Takes</span> <em id="histCount">0</em></span>
+          <button id="clearHist" class="linkbtn" data-i18n="hist_clear">Clear</button>
         </div>
         <div id="history" class="history">
           <div id="histEmpty" class="empty">
             <span class="empty__mark">◟◜</span>
-            <span>Aucune prise pour l'instant.<br />Maintiens <b>Ctrl + Espace</b> et parle.</span>
+            <span data-i18n-html="hist_empty">No takes yet.<br />Hold <b>Ctrl + Space</b> and speak.</span>
           </div>
         </div>
       </section>
@@ -72,15 +80,36 @@
       <section class="panel" data-panel="reglages">
         <div class="form">
           <label class="field">
-            <span class="field__label">Raccourci push-to-talk</span>
+            <span class="field__label" data-i18n="lbl_lang">Language</span>
+            <div class="select">
+              <select id="lang">
+                <option value="en">English</option>
+                <option value="fr">Français</option>
+              </select>
+              <svg class="select__chevron" viewBox="0 0 12 8"><path d="M1 1.5 6 6.5 11 1.5" /></svg>
+            </div>
+          </label>
+          <label class="field">
+            <span class="field__label" data-i18n="lbl_dictation">Dictation language</span>
+            <div class="select">
+              <select id="dictationLang">
+                <option value="multi" data-i18n="opt_multi">Multilingual — Parakeet v3 (25 languages)</option>
+                <option value="ka" data-i18n="opt_ka">ქართული — Georgian</option>
+              </select>
+              <svg class="select__chevron" viewBox="0 0 12 8"><path d="M1 1.5 6 6.5 11 1.5" /></svg>
+            </div>
+            <span class="hint" data-i18n="hint_dictation">Switching reloads the model, which takes a few seconds. The custom vocabulary is Latin-script, so it is not applied in Georgian.</span>
+          </label>
+          <label class="field">
+            <span class="field__label" data-i18n="lbl_ptt">Push-to-talk shortcut</span>
             <input id="ptt" class="input input--mono" type="text" spellcheck="false" />
           </label>
           <label class="field">
-            <span class="field__label">Raccourci mains-libres (toggle)</span>
+            <span class="field__label" data-i18n="lbl_toggle">Hands-free shortcut (toggle)</span>
             <input id="toggle" class="input input--mono" type="text" spellcheck="false" />
           </label>
           <label class="field">
-            <span class="field__label">Microphone</span>
+            <span class="field__label" data-i18n="lbl_mic">Microphone</span>
             <div class="select">
               <select id="device"></select>
               <svg class="select__chevron" viewBox="0 0 12 8"><path d="M1 1.5 6 6.5 11 1.5" /></svg>
@@ -88,49 +117,62 @@
           </label>
 
           <div class="switches">
-            <label class="switch"><input id="sounds" type="checkbox" /><span class="switch__track"></span><span class="switch__label">Sons de feedback</span></label>
-            <label class="switch"><input id="overlay" type="checkbox" /><span class="switch__track"></span><span class="switch__label">HUD à l'écran pendant la dictée</span></label>
-            <label class="switch"><input id="restore" type="checkbox" /><span class="switch__track"></span><span class="switch__label">Restaurer le presse-papiers</span></label>
+            <label class="switch"><input id="sounds" type="checkbox" /><span class="switch__track"></span><span class="switch__label" data-i18n="sw_sounds">Feedback sounds</span></label>
+            <label class="switch"><input id="overlay" type="checkbox" /><span class="switch__track"></span><span class="switch__label" data-i18n="sw_overlay">On-screen HUD while dictating</span></label>
+            <label class="switch"><input id="restore" type="checkbox" /><span class="switch__track"></span><span class="switch__label" data-i18n="sw_restore">Restore the clipboard</span></label>
           </div>
 
           <div class="field field--slider">
-            <div class="field__head"><span class="field__label">Sensibilité au silence</span><span id="peakVal" class="readout">0.008</span></div>
+            <div class="field__head"><span class="field__label" data-i18n="lbl_peak">Silence sensitivity</span><span id="peakVal" class="readout">0.008</span></div>
             <input id="peak" class="range" type="range" min="0.002" max="0.05" step="0.001" />
           </div>
           <div class="field field--slider">
-            <div class="field__head"><span class="field__label">Force du vocabulaire</span><span id="scoreVal" class="readout">2.0</span></div>
+            <div class="field__head"><span class="field__label" data-i18n="lbl_score">Vocabulary strength</span><span id="scoreVal" class="readout">2.0</span></div>
             <input id="score" class="range" type="range" min="0" max="8" step="0.5" />
-            <span class="hint">2 = doux · 4 = fort · 8 = le mot s'invite partout. Changer la force ou le micro applique après un court rechargement.</span>
+            <span class="hint" data-i18n="hint_score">2 = gentle · 4 = strong · 8 = the word shows up everywhere. Changing the strength or the microphone applies after a short reload.</span>
           </div>
 
-          <button id="applySettings" class="btn btn--amber">Appliquer les réglages</button>
+          <button id="applySettings" class="btn btn--amber" data-i18n="btn_apply">Apply settings</button>
         </div>
       </section>
 
       <!-- Vocabulaire -->
       <section class="panel" data-panel="vocabulaire">
-        <p class="hint hint--top">Un mot ou nom propre par ligne · <b>#</b> = commentaire. Ces mots sont boostés à la transcription.</p>
+        <p class="hint hint--top" data-i18n-html="hint_vocab">One word or proper noun per line · <b>#</b> = comment. These words are boosted during transcription.</p>
         <textarea id="vocab" class="textarea" spellcheck="false"></textarea>
-        <button id="saveVocab" class="btn btn--amber">Enregistrer &amp; recharger</button>
+        <button id="saveVocab" class="btn btn--amber" data-i18n-html="btn_savevocab">Save &amp; reload</button>
       </section>
 
       <!-- Corrections -->
       <section class="panel" data-panel="corrections">
-        <p class="hint hint--top">Une correction par ligne : <b>erreur = remplacement</b> (insensible à la casse, mots entiers). Appliqué instantanément.</p>
+        <p class="hint hint--top" data-i18n-html="hint_corr">One correction per line: <b>error = replacement</b> (case-insensitive, whole words). Applied instantly.</p>
         <textarea id="corr" class="textarea" spellcheck="false"></textarea>
-        <button id="saveCorr" class="btn btn--amber">Enregistrer les corrections</button>
+        <button id="saveCorr" class="btn btn--amber" data-i18n="btn_savecorr">Save corrections</button>
       </section>
 
     </main>
 
     <footer class="foot">
-      <span class="foot__brand">100&nbsp;% local · Parakeet&nbsp;v3 · offline</span>
-      <button id="quit" class="foot__quit">Quitter</button>
+      <span class="foot__brand" data-i18n-html="foot_brand">100&nbsp;% local · Parakeet&nbsp;v3 · offline</span>
+      <button id="quit" class="foot__quit" data-i18n="btn_quit">Quit</button>
     </footer>
 
     <div id="toast" class="toast" hidden></div>
   </div>
 
+  <!-- Poignées de redimensionnement : la fenêtre est sans bordure, Windows n'en
+       fournit aucune. Chaque zone porte le bord qu'elle tire. -->
+  <div class="rz rz--n"  data-edge="n"  aria-hidden="true"></div>
+  <div class="rz rz--s"  data-edge="s"  aria-hidden="true"></div>
+  <div class="rz rz--w"  data-edge="w"  aria-hidden="true"></div>
+  <div class="rz rz--e"  data-edge="e"  aria-hidden="true"></div>
+  <div class="rz rz--nw" data-edge="nw" aria-hidden="true"></div>
+  <div class="rz rz--ne" data-edge="ne" aria-hidden="true"></div>
+  <div class="rz rz--sw" data-edge="sw" aria-hidden="true"></div>
+  <div class="rz rz--se" data-edge="se" aria-hidden="true"></div>
+
+  <script src="i18n.js"></script>
+  <script src="orbs.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

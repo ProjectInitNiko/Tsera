@@ -5,10 +5,11 @@ Deux raccourcis globaux :
   - Ctrl+Shift+Espace (1 appui/1)  → toggle mains-libres
 Le texte transcrit se colle au curseur, dans n'importe quelle application.
 
-L'interface (customtkinter) montre le statut live, l'historique des dictées et
-les réglages (raccourcis, micro, vocabulaire, corrections). Fermer la fenêtre la
-réduit dans la barre système ; l'app continue d'écouter. Lancer avec `--tray`
-pour démarrer directement réduit (utilisé par le raccourci de démarrage auto).
+L'interface (web embarquée, pywebview) montre le statut live, l'historique des
+dictées et les réglages (langue, raccourcis, micro, vocabulaire, corrections).
+Fermer la fenêtre la réduit dans la barre système ; l'app continue d'écouter.
+Lancer avec `--tray` pour démarrer réduit (utilisé par le démarrage auto).
+Interface en anglais par défaut, français au choix dans les réglages.
 
 Tout tourne en local (Parakeet v3 via sherpa-onnx, CPU). Aucune donnée ne sort du PC.
 """
@@ -26,12 +27,19 @@ import numpy as np
 import pyperclip
 import pystray
 import sounddevice as sd
-from PIL import Image, ImageDraw
+from PIL import Image
 
+from make_icon import AMBER as _ICON_AMBER
+from make_icon import render as _icon_render
 from overlay import Overlay
 from stt import Transcriber
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Modèle géorgien : nvidia/stt_ka_fastconformer_hybrid_large_pc (CC-BY-4.0),
+# export ONNX de LukeJacob2023. Même famille que Parakeet (NeMo transducer),
+# donc il se charge par le même chemin. Parakeet reste le modèle par défaut.
+MODEL_DIR_KA = "sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc"
 
 # Console Windows en cp1252 : force UTF-8 pour les accents et flèches des logs.
 # Sous pythonw, stdout/stderr sont None (print = no-op), on ne touche à rien.
@@ -159,17 +167,47 @@ def paste_text(text: str, restore_clipboard: bool):
         threading.Thread(target=_restore, daemon=True).start()
 
 
+# Libellés visibles côté Python (barre système, notices). L'anglais est la
+# langue par défaut de l'app ; l'interface, elle, se traduit dans web/i18n.js.
+STRINGS = {
+    "en": {
+        "open": "Open PersonalWhisper",
+        "quit": "Quit",
+        "copied": "Copied to clipboard",
+        "startup_error": "Startup error: {}",
+        "mic_unavailable": "Microphone unavailable: {}",
+        "settings_applied": "Settings applied",
+        "vocab_saved": "Vocabulary reloaded",
+        "corr_saved": "Corrections saved",
+        "reload_error": "Reload error: {}",
+        "stt_error": "Transcription error: {}",
+    },
+    "fr": {
+        "open": "Ouvrir PersonalWhisper",
+        "quit": "Quitter",
+        "copied": "Copié dans le presse-papiers",
+        "startup_error": "Erreur au démarrage : {}",
+        "mic_unavailable": "Micro indisponible : {}",
+        "settings_applied": "Réglages appliqués",
+        "vocab_saved": "Vocabulaire rechargé",
+        "corr_saved": "Corrections enregistrées",
+        "reload_error": "Erreur de rechargement : {}",
+        "stt_error": "Erreur de transcription : {}",
+    },
+}
+
+
+def tr(lang: str, key: str) -> str:
+    return STRINGS.get(lang if lang in STRINGS else "en", STRINGS["en"])[key]
+
+
 def make_icon(recording: bool) -> Image.Image:
-    """Icône tray : rond gris (repos) ou rouge (enregistrement)."""
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    color = (232, 67, 31, 255) if recording else (120, 120, 130, 255)
-    d.ellipse((8, 8, 56, 56), fill=color)
-    # Silhouette micro
-    d.rounded_rectangle((26, 16, 38, 38), radius=6, fill=(255, 255, 255, 255))
-    d.arc((20, 26, 44, 46), start=0, end=180, fill=(255, 255, 255, 255), width=3)
-    d.line((32, 46, 32, 52), fill=(255, 255, 255, 255), width=3)
-    return img
+    """Icône tray : la pastille « NK », ambre au repos, rouge VU en dictée.
+
+    Même dessin que `icon.ico` (raccourci Bureau) — une seule définition du
+    sigle, dans make_icon.py, pour que les deux ne divergent jamais.
+    """
+    return _icon_render(64, (232, 67, 31, 255) if recording else _ICON_AMBER)
 
 
 def compile_corrections(corrections: dict):
@@ -211,6 +249,7 @@ class Engine:
         self.record_started_at = 0.0
         self.busy = False
         self.icon: pystray.Icon | None = None
+        self.build_tray_menu = None  # posé par main() : (lang) → pystray.Menu
         self.status = "loading"
         self.stt: Transcriber | None = None
         self._held: dict[str, bool] = {}
@@ -222,20 +261,41 @@ class Engine:
             on_level=self.overlay.push_level,
         )
 
+    def refresh_tray_menu(self, lang: str):
+        """Réécrit le menu de la barre système dans la langue choisie."""
+        if not self.icon or not self.build_tray_menu:
+            return
+        try:
+            self.icon.menu = self.build_tray_menu(lang)
+            self.icon.update_menu()
+        except Exception:
+            pass
+
     # --- Chargement du modèle ------------------------------------------------
 
+    def model_dir(self) -> str:
+        """Dossier du modèle correspondant à la langue de dictée choisie."""
+        if self.cfg.get("dictation_lang") == "ka":
+            return self.cfg.get("model_dir_ka", MODEL_DIR_KA)
+        return self.cfg["model_dir"]
+
     def load_model(self):
-        vocab = load_vocab(self.cfg)
+        georgian = self.cfg.get("dictation_lang") == "ka"
+        # Le vocabulaire custom (PERSEUS, Mecazic…) est écrit en alphabet latin :
+        # le modèle géorgien n'a aucun token pour l'encoder, le biasing n'aurait
+        # rien à quoi s'accrocher. On le laisse de côté dans ce mode.
+        vocab = [] if georgian else load_vocab(self.cfg)
         log("Chargement du modèle…")
         self.stt = Transcriber(
-            model_dir=os.path.join(APP_DIR, self.cfg["model_dir"]),
+            model_dir=os.path.join(APP_DIR, self.model_dir()),
             num_threads=self.cfg["num_threads"],
             sample_rate=self.cfg["sample_rate"],
             vocab=vocab,
             vocab_score=self.cfg.get("vocab_score", 2.0),
         )
         mode = f"{len(vocab)} mots boostés (beam search)" if vocab else "aucun (greedy)"
-        log(f"Modèle chargé en {self.stt.load_time:.1f} s — vocabulaire : {mode}")
+        log(f"Modèle chargé en {self.stt.load_time:.1f} s — "
+            f"{'géorgien' if georgian else 'multilingue'} · vocabulaire : {mode}")
 
     def reload_async(self):
         """Reconstruit le transcriber (nouveau vocab / score) sans figer l'UI."""
@@ -243,10 +303,10 @@ class Engine:
             self._set_status("reloading")
             try:
                 self.load_model()
-                self.on_event("notice", "Vocabulaire rechargé")
+                self.on_event("notice", tr(self.cfg.get("lang", "en"), "vocab_saved"))
             except Exception as e:
                 log(f"Erreur reload : {e}")
-                self.on_event("notice", f"Erreur rechargement : {e}")
+                self.on_event("notice", tr(self.cfg.get("lang", "en"), "reload_error").format(e))
             finally:
                 self._set_status("ready")
         threading.Thread(target=_work, daemon=True).start()
@@ -360,7 +420,7 @@ class Engine:
         except Exception as e:
             log(f"Erreur : {e}")
             self.beep(200, 300)
-            self.on_event("notice", f"Erreur transcription : {e}")
+            self.on_event("notice", tr(self.cfg.get("lang", "en"), "stt_error").format(e))
         finally:
             self.busy = False
             self.overlay.hide()
@@ -465,7 +525,9 @@ class Engine:
             or (s.get("toggle_hotkey") or None) != (cfg.get("toggle_hotkey") or None)
         )
         device_changed = s.get("device") != cfg.get("device")
-        reload_needed = abs(
+        # Changer de langue de dictée change de modèle : rechargement obligatoire.
+        lang_changed = s.get("dictation_lang", "multi") != cfg.get("dictation_lang", "multi")
+        reload_needed = lang_changed or abs(
             float(s["vocab_score"]) - float(cfg.get("vocab_score", 2.0))
         ) > 1e-9
 
@@ -476,6 +538,7 @@ class Engine:
         cfg["restore_clipboard"] = bool(s["restore_clipboard"])
         cfg["min_peak"] = float(s["min_peak"])
         cfg["vocab_score"] = float(s["vocab_score"])
+        cfg["dictation_lang"] = "ka" if s.get("dictation_lang") == "ka" else "multi"
         cfg["overlay"] = bool(s["overlay"])
         self.overlay.set_enabled(cfg["overlay"])
         save_config(cfg)
@@ -486,11 +549,11 @@ class Engine:
             try:
                 self.recorder.set_device(cfg["device"])
             except Exception as e:
-                self.on_event("notice", f"Micro indisponible : {e}")
+                self.on_event("notice", tr(self.cfg.get("lang", "en"), "mic_unavailable").format(e))
         if reload_needed:
             self.reload_async()
         else:
-            self.on_event("notice", "Réglages appliqués")
+            self.on_event("notice", tr(self.cfg.get("lang", "en"), "settings_applied"))
 
     def save_vocab_text(self, text: str):
         with open(vocab_path(self.cfg), "w", encoding="utf-8") as f:
@@ -501,7 +564,7 @@ class Engine:
         self.cfg["corrections"] = corrections
         self._corrections = compile_corrections(corrections)
         save_config(self.cfg)
-        self.on_event("notice", "Corrections enregistrées")
+        self.on_event("notice", tr(self.cfg.get("lang", "en"), "corr_saved"))
 
     def shutdown(self):
         try:
@@ -550,7 +613,10 @@ def main():
         js_api=api,
         width=640,
         height=800,
-        min_size=(560, 680),
+        # Plancher bas : la faceplate se resserre en dessous de 560 px de large
+        # (voir la requête média du style). Doit rester aligné sur _MIN_W/_MIN_H
+        # de webui.py, qui borne aussi le redimensionnement à la poignée.
+        min_size=(380, 420),
         background_color="#14110D",
         frameless=True,
         easy_drag=False,   # drag seulement via .pywebview-drag-region (la barre de titre)
@@ -560,14 +626,19 @@ def main():
     api._attach(engine, window)
 
     # Tray : menu Ouvrir / Quitter (double-clic = Ouvrir). run_detached car la
-    # boucle principale appartient à webview.
-    menu = pystray.Menu(
-        pystray.MenuItem(
-            "Ouvrir PersonalWhisper", lambda i, it: window.show(), default=True
-        ),
-        pystray.MenuItem("Quitter", lambda i, it: api.quit_app()),
+    # boucle principale appartient à webview. Le menu se reconstruit quand la
+    # langue change dans les réglages, d'où la fabrique gardée sur l'engine.
+    def _tray_menu(lang: str):
+        return pystray.Menu(
+            pystray.MenuItem(tr(lang, "open"), lambda i, it: window.show(), default=True),
+            pystray.MenuItem(tr(lang, "quit"), lambda i, it: api.quit_app()),
+        )
+
+    engine.build_tray_menu = _tray_menu
+    icon = pystray.Icon(
+        "PersonalWhisper", make_icon(False), "PersonalWhisper",
+        _tray_menu(cfg.get("lang", "en")),
     )
-    icon = pystray.Icon("PersonalWhisper", make_icon(False), "PersonalWhisper", menu)
     engine.icon = icon
     icon.run_detached()
 
@@ -580,7 +651,7 @@ def main():
             api._emit("model_ready", None)
         except Exception as e:
             log(f"Erreur au démarrage : {e}")
-            api._emit("notice", f"Erreur démarrage : {e}")
+            api._emit("notice", tr(cfg.get("lang", "en"), "startup_error").format(e))
 
     threading.Thread(target=_boot, daemon=True).start()
 

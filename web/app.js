@@ -4,16 +4,20 @@
 const $ = (id) => document.getElementById(id);
 const api = () => (window.pywebview && window.pywebview.api) || null;
 
+/* `word` est l'anglais ; la clé sert à retrouver le français. */
 const STATUS = {
-  loading:          { led: "amber", word: "Chargement",     rec: false, wave: "loading" },
-  reloading:        { led: "amber", word: "Rechargement",   rec: false, wave: "loading" },
-  ready:            { led: "green", word: "Prêt",           rec: false, wave: "ready" },
-  recording_ptt:    { led: "red",   word: "Écoute",         rec: true,  wave: "recording" },
-  recording_toggle: { led: "red",   word: "Mains-libres",   rec: true,  wave: "recording" },
-  processing:       { led: "amber", word: "Transcription",  rec: false, wave: "processing" },
+  loading:          { led: "amber", word: "Loading",       rec: false, wave: "loading" },
+  reloading:        { led: "amber", word: "Reloading",     rec: false, wave: "loading" },
+  ready:            { led: "green", word: "Ready",         rec: false, wave: "ready" },
+  recording_ptt:    { led: "red",   word: "Listening",     rec: true,  wave: "recording" },
+  recording_toggle: { led: "red",   word: "Hands-free",    rec: true,  wave: "recording" },
+  processing:       { led: "amber", word: "Transcribing",  rec: false, wave: "processing" },
 };
 
+const tr = (key, fallback) => (window.PWI18n ? window.PWI18n.t(key, fallback) : fallback);
+
 let modelReady = false;
+let currentStatus = "loading";
 
 /* ---------- Bridge : Python appelle window.PW.on(kind, payload) ---------- */
 window.PW = {
@@ -28,9 +32,10 @@ window.PW = {
 
 /* ---------- Statut + forme d'onde ---------- */
 function setStatus(s) {
+  currentStatus = s;
   const st = STATUS[s] || { led: "amber", word: s, rec: false, wave: "ready" };
   $("led").className = "led led--" + st.led;
-  $("statusWord").textContent = st.word;
+  $("statusWord").textContent = tr("status_" + s, st.word);
   $("rec").hidden = !st.rec;
   wave.mode = st.wave;
   if (s === "loading" || s === "reloading") setHeavyEnabled(false);
@@ -43,13 +48,18 @@ function setHeavyEnabled(on) {
 }
 
 /* ---------- Raccourcis → keycaps ---------- */
-const KEYNAME = { ctrl: "Ctrl", control: "Ctrl", shift: "Maj", alt: "Alt", space: "Espace",
-  "right ctrl": "Ctrl D", "right shift": "Maj D" };
+/* Les noms de touches suivent la langue : Maj/Espace en français. */
+const KEYNAME = () => ({
+  ctrl: "Ctrl", control: "Ctrl", alt: "Alt",
+  shift: tr("key_shift", "Shift"), space: tr("key_space", "Space"),
+  "right ctrl": tr("key_rctrl", "Right Ctrl"), "right shift": tr("key_rshift", "Right Shift"),
+});
 function keycaps(hotkey) {
   if (!hotkey) return "";
+  const names = KEYNAME();
   return hotkey.split("+").map((p) => {
     const k = p.trim().toLowerCase();
-    const name = KEYNAME[k] || (k.charAt(0).toUpperCase() + k.slice(1));
+    const name = names[k] || (k.charAt(0).toUpperCase() + k.slice(1));
     return `<span class="cap">${name}</span>`;
   }).join("");
 }
@@ -182,6 +192,9 @@ function loopWave(ts) {
 
 /* ---------- Réglages ---------- */
 function fillState(s) {
+  // La langue d'abord : tout ce qui suit s'écrit déjà dans la bonne.
+  setLang(s.lang === "fr" ? "fr" : "en", false);
+  $("lang").value = window.PWI18n ? window.PWI18n.lang : "en";
   $("ptt").value = s.hotkey || "";
   $("toggle").value = s.toggle_hotkey || "";
   $("pttKeys").innerHTML = keycaps(s.hotkey);
@@ -189,7 +202,7 @@ function fillState(s) {
 
   const sel = $("device");
   sel.innerHTML = "";
-  const def = new Option("Défaut système", "");
+  const def = new Option(tr("mic_default", "System default"), "");
   sel.add(def);
   (s.devices || []).forEach((d) => sel.add(new Option(`${d.index} · ${d.name}`, String(d.index))));
   sel.value = s.device == null ? "" : String(s.device);
@@ -202,6 +215,11 @@ function fillState(s) {
   $("peakVal").textContent = Number(s.min_peak ?? 0.008).toFixed(3);
   $("score").value = s.vocab_score ?? 2.0;
   $("scoreVal").textContent = Number(s.vocab_score ?? 2.0).toFixed(1);
+
+  // Le géorgien n'est proposé que si son modèle est réellement sur le disque.
+  $("dictationLang").value = s.dictation_lang === "ka" ? "ka" : "multi";
+  const kaOpt = $("dictationLang").querySelector('option[value="ka"]');
+  if (kaOpt) kaOpt.disabled = s.has_georgian === false;
 
   $("vocab").value = s.vocab_text || "";
   $("corr").value = (s.corrections || []).map((c) => `${c.error} = ${c.replacement}`).join("\n");
@@ -216,6 +234,7 @@ function gatherSettings() {
     hotkey: $("ptt").value.trim() || "ctrl+space",
     toggle_hotkey: $("toggle").value.trim(),
     device: dev === "" ? null : parseInt(dev, 10),
+    dictation_lang: $("dictationLang").value,
     sounds: $("sounds").checked,
     overlay: $("overlay").checked,
     restore_clipboard: $("restore").checked,
@@ -249,10 +268,101 @@ function wireControls() {
     api().save_corrections(list);
   });
 
+  // La langue s'applique tout de suite : elle ne passe pas par « Appliquer les
+  // réglages », qui recharge le modèle.
+  $("lang").addEventListener("change", (e) => setLang(e.target.value, true));
+
   $("clearHist").addEventListener("click", clearHistory);
   $("min").addEventListener("click", () => api() && api().minimize());
   $("close").addEventListener("click", () => api() && api().minimize());
   $("quit").addEventListener("click", () => api() && api().quit_app());
+}
+
+/* ---------- Langue ----------
+   L'anglais est la langue par défaut (elle est écrite dans le HTML) ; i18n.js
+   substitue le français. Le choix est écrit dans config.json côté Python, donc
+   il survit au redémarrage et sert aussi au menu de la barre système. */
+function setLang(lang, persist) {
+  if (window.PWI18n) window.PWI18n.apply(lang);
+  // Les textes posés par le script ne portent pas de data-i18n : on les refait.
+  setStatus(currentStatus);
+  $("pttKeys").innerHTML = keycaps($("ptt").value);
+  $("toggleKeys").innerHTML = keycaps($("toggle").value);
+  const sel = $("device");
+  if (sel.options.length) sel.options[0].text = tr("mic_default", "System default");
+  if (persist && api()) api().set_lang(lang);
+}
+
+/* ---------- Fenêtre : agrandir, plein écran, redimensionner ----------
+   La fenêtre est sans bordure : Windows ne fournit ni bouton d'agrandissement
+   ni poignées, tout est ici. */
+
+let maximized = false;
+
+async function toggleMax() {
+  if (!api()) return;
+  maximized = await api().toggle_maximize();
+  document.body.classList.toggle("is-max", !!maximized);
+  resizeWave();
+}
+
+function initWindowControls() {
+  $("max").addEventListener("click", toggleMax);
+
+  // Double-clic sur la barre de titre : le geste Windows attendu.
+  document.querySelector(".titlebar").addEventListener("dblclick", (e) => {
+    if (!e.target.closest(".winbtn")) toggleMax();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "F11") { e.preventDefault(); api() && api().toggle_fullscreen(); }
+  });
+
+  // Poignées. On raisonne en coordonnées ÉCRAN : la fenêtre bouge sous le
+  // curseur pendant le tirage, donc les coordonnées client seraient un
+  // référentiel mouvant. Un seul appel au bridge par frame d'affichage.
+  let drag = null, pending = null, raf = null;
+
+  const flush = () => {
+    raf = null;
+    if (pending && api()) { api().set_bounds(pending.x, pending.y, pending.w, pending.h); }
+    pending = null;
+  };
+
+  document.querySelectorAll(".rz").forEach((h) => {
+    h.addEventListener("pointerdown", async (e) => {
+      if (e.button !== 0 || !api() || maximized) return;
+      const b = await api().window_bounds();
+      if (!b) return;
+      drag = { edge: h.dataset.edge, sx: e.screenX, sy: e.screenY, b };
+      h.setPointerCapture(e.pointerId);  // les mouvements suivent hors fenêtre
+      e.preventDefault();
+    });
+
+    h.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.screenX - drag.sx, dy = e.screenY - drag.sy, E = drag.edge;
+      let { x, y, width: w, height: hh } = drag.b;
+      // Tirer par le haut ou la gauche déplace l'origine autant qu'il
+      // redimensionne — sinon la fenêtre glisserait au lieu de s'étirer.
+      if (E.includes("e")) w += dx;
+      if (E.includes("s")) hh += dy;
+      if (E.includes("w")) { w -= dx; x += dx; }
+      if (E.includes("n")) { hh -= dy; y += dy; }
+      pending = { x, y, w, h: hh };
+      if (raf === null) raf = requestAnimationFrame(flush);
+    });
+
+    const end = (e) => {
+      if (!drag) return;
+      drag = null;
+      if (raf !== null) { cancelAnimationFrame(raf); flush(); }
+      try { h.releasePointerCapture(e.pointerId); } catch (_) {}
+      resizeWave();
+    };
+    h.addEventListener("pointerup", end);
+    h.addEventListener("pointercancel", end);
+  });
 }
 
 /* ---------- Démarrage ---------- */
@@ -260,6 +370,12 @@ window.addEventListener("DOMContentLoaded", () => {
   initTabs();
   initWave();
   wireControls();
+  initWindowControls();
+  // L'orbe « working » : l'app est vivante et prête à écouter.
+  if (window.PWOrb) {
+    const el = $("stateOrb");
+    if (el) window.PWOrb.mount(el, { size: window.innerWidth < 560 ? 34 : 44 });
+  }
   window.addEventListener("resize", () => { resizeWave(); });
 });
 window.addEventListener("pywebviewready", async () => {

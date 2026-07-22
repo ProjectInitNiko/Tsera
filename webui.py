@@ -5,7 +5,8 @@ méthodes publiques** de cet objet et récurserait dans ses attributs-objets —
 le préfixe `_` sur tout l'état interne (`_engine`, `_window`, `_cfg`…) et sur les
 méthodes non destinées au JS (`_emit`, `_attach`). Seules restent publiques les
 méthodes réellement appelées côté JS : ready / apply_settings / save_vocab /
-save_corrections / copy_text / minimize / quit_app.
+save_corrections / copy_text / minimize / quit_app, plus les commandes de
+fenêtre (window_bounds / set_bounds / toggle_maximize / toggle_fullscreen).
 
 Les événements du moteur sont poussés vers le JS via `evaluate_js` ; ceux émis
 avant que le JS n'ait signalé `ready()` sont tamponnés puis rejoués.
@@ -19,6 +20,9 @@ import pyperclip
 
 import app as _app
 
+# Plancher de redimensionnement : en dessous, la faceplate se disloque.
+_MIN_W, _MIN_H = 380, 420
+
 
 class Api:
     def __init__(self, cfg: dict):
@@ -30,6 +34,8 @@ class Api:
         self._lock = threading.Lock()
         self._status = "loading"
         self._history = []
+        self._maximized = False
+        self._fullscreen = False
 
     def _attach(self, engine, window):
         self._engine = engine
@@ -82,6 +88,11 @@ class Api:
             "hotkey": cfg.get("hotkey", "ctrl+space"),
             "toggle_hotkey": cfg.get("toggle_hotkey") or "",
             "devices": [{"index": i, "name": n} for i, n in _app.list_input_devices()],
+            "lang": cfg.get("lang", "en"),
+            "dictation_lang": cfg.get("dictation_lang", "multi"),
+            "has_georgian": os.path.isdir(
+                os.path.join(_app.APP_DIR, cfg.get("model_dir_ka", _app.MODEL_DIR_KA))
+            ),
             "device": cfg.get("device"),
             "sounds": cfg.get("sounds", True),
             "overlay": cfg.get("overlay", True),
@@ -117,10 +128,24 @@ class Api:
             self._engine.save_corrections(corr)
         return True
 
+    def set_lang(self, lang: str):
+        """Langue de l'interface. Écrite dans config.json (et pas seulement dans
+        le front) : elle sert aussi au menu de la barre système, qui est construit
+        côté Python, et elle survit au redémarrage."""
+        lang = "fr" if lang == "fr" else "en"
+        self._cfg["lang"] = lang
+        try:
+            _app.save_config(self._cfg)
+        except Exception:
+            pass
+        if self._engine:
+            self._engine.refresh_tray_menu(lang)
+        return lang
+
     def copy_text(self, text: str):
         try:
             pyperclip.copy(text or "")
-            self._emit("notice", "Copié dans le presse-papiers")
+            self._emit("notice", _app.tr(self._cfg.get("lang", "en"), "copied"))
         except Exception:
             pass
         return True
@@ -132,6 +157,59 @@ class Api:
             except Exception:
                 pass
         return True
+
+    # --- Fenêtre : la faceplate est sans bordure, donc rien de tout ça n'est
+    # fourni par Windows — les poignées et les boutons sont dessinés par le
+    # front, qui appelle ces méthodes.
+
+    def window_bounds(self):
+        """Position et taille courantes, en pixels écran. Le JS s'en sert comme
+        point de départ d'un redimensionnement (il raisonne ensuite en
+        coordonnées écran, insensibles au déplacement de la fenêtre)."""
+        w = self._window
+        if not w:
+            return None
+        try:
+            return {"x": w.x, "y": w.y, "width": w.width, "height": w.height}
+        except Exception:
+            return None
+
+    def set_bounds(self, x: int, y: int, width: int, height: int):
+        w = self._window
+        if not w:
+            return False
+        try:
+            width = max(_MIN_W, int(width))
+            height = max(_MIN_H, int(height))
+            w.resize(width, height)
+            w.move(int(x), int(y))
+        except Exception:
+            return False
+        return True
+
+    def toggle_maximize(self):
+        """Renvoie l'état atteint pour que le bouton change d'icône."""
+        w = self._window
+        if not w:
+            return False
+        try:
+            if self._maximized:
+                w.restore()
+            else:
+                w.maximize()
+            self._maximized = not self._maximized
+        except Exception:
+            return self._maximized
+        return self._maximized
+
+    def toggle_fullscreen(self):
+        if self._window:
+            try:
+                self._window.toggle_fullscreen()
+                self._fullscreen = not self._fullscreen
+            except Exception:
+                pass
+        return self._fullscreen
 
     def quit_app(self):
         if self._engine:

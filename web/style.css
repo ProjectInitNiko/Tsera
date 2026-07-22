@@ -15,7 +15,7 @@
   --text:#F0E9DB; --muted:#9A9080; --muted-2:#6B6353;
   --font-display:"Anton", "Arial Narrow", Impact, sans-serif;
   --font-ui:"Inter", "Segoe UI", system-ui, sans-serif;
-  --font-mono:"Plex Mono", "Consolas", ui-monospace, monospace;
+  --font-mono:"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --r:14px; --r-sm:9px;
 }
 
@@ -50,6 +50,10 @@ body::after {
   height:100vh; display:flex; flex-direction:column;
   padding:0 16px 14px;
 }
+/* Un enfant flex a min-width:auto — il refuse de passer sous la largeur de son
+   contenu et pousse alors toute la faceplate hors de la fenêtre quand on la
+   rétrécit (les onglets, notamment). */
+.app > * { min-width:0; }
 
 /* ---- Barre de titre / faceplate ---- */
 .titlebar {
@@ -251,6 +255,43 @@ body::after {
 ::-webkit-scrollbar-thumb { background:var(--edge); border-radius:9px; border:2px solid var(--bg); }
 ::-webkit-scrollbar-thumb:hover { background:var(--edge-soft); }
 ::-webkit-scrollbar-track { background:transparent; }
+
+/* ---- Orbe d'état (canvas, piloté par orbs.js) ---- */
+.signal__gap { flex:1 1 auto; }
+.state-orb { flex:0 0 auto; margin-left:10px; display:block; }
+
+/* ---- Poignées de redimensionnement ----
+   Sans bordure système, c'est à nous de fournir les zones d'accroche. Elles
+   sont fixes, au-dessus de tout (la barre de titre draggable comprise, sinon
+   le bord haut déplacerait la fenêtre au lieu de la redimensionner). */
+.rz { position:fixed; z-index:100; }
+.rz--n  { top:0;    left:8px;  right:8px;  height:5px;  cursor:ns-resize; }
+.rz--s  { bottom:0; left:8px;  right:8px;  height:5px;  cursor:ns-resize; }
+.rz--w  { left:0;   top:8px;   bottom:8px; width:5px;   cursor:ew-resize; }
+.rz--e  { right:0;  top:8px;   bottom:8px; width:5px;   cursor:ew-resize; }
+.rz--nw { top:0;    left:0;    width:12px; height:12px; cursor:nwse-resize; }
+.rz--ne { top:0;    right:0;   width:12px; height:12px; cursor:nesw-resize; }
+.rz--sw { bottom:0; left:0;    width:12px; height:12px; cursor:nesw-resize; }
+.rz--se { bottom:0; right:0;   width:12px; height:12px; cursor:nwse-resize; }
+/* Agrandie ou en plein écran, il n'y a plus rien à tirer. */
+body.is-max .rz { display:none; }
+
+/* ---- Fenêtre resserrée ----
+   En dessous de 560 px la faceplate d'origine déborde : le titre géant, les
+   onglets et la forme d'onde se resserrent pour rester lisibles. */
+@media (max-width: 559px) {
+  .app { padding:0 12px 12px; }
+  .titlebar { margin:0 -12px; padding:0 10px; height:46px; }
+  .signal { margin-top:10px; padding:12px 13px 11px; }
+  .status-word { font-size:20px; }
+  .state-orb { width:34px !important; height:34px !important; }
+  .wave { height:48px; margin:9px 0 5px; }
+  .tabs { overflow-x:auto; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { white-space:nowrap; }
+  .wordmark { display:none; }
+  .keys { font-size:11px; gap:6px; }
+}
 
 /* ---- Accessibilité ---- */
 :focus-visible { outline:2px solid rgba(255,170,43,.6); outline-offset:2px; }
