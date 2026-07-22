@@ -18,6 +18,18 @@ const tr = (key, fallback) => (window.PWI18n ? window.PWI18n.t(key, fallback) : 
 
 let modelReady = false;
 let currentStatus = "loading";
+let currentDictationLang = "multi";
+
+/* Nom du modèle affiché dans le pied de page. Il suit la langue de dictée : le
+   pied était figé sur « Parakeet v3 », il ne bougeait pas au passage en géorgien. */
+function setFootModel(dl) {
+  if (dl) currentDictationLang = dl === "ka" ? "ka" : "multi";
+  const el = $("footModel");
+  if (!el) return;
+  el.innerHTML = currentDictationLang === "ka"
+    ? tr("model_ka", "Georgian")
+    : tr("model_multi", "Parakeet&nbsp;v3");
+}
 
 /* ---------- Bridge : Python appelle window.PW.on(kind, payload) ---------- */
 window.PW = {
@@ -220,6 +232,7 @@ function fillState(s) {
   $("dictationLang").value = s.dictation_lang === "ka" ? "ka" : "multi";
   const kaOpt = $("dictationLang").querySelector('option[value="ka"]');
   if (kaOpt) kaOpt.disabled = s.has_georgian === false;
+  setFootModel(s.dictation_lang);
 
   $("vocab").value = s.vocab_text || "";
   $("corr").value = (s.corrections || []).map((c) => `${c.error} = ${c.replacement}`).join("\n");
@@ -253,6 +266,7 @@ function wireControls() {
     api().apply_settings(s);
     $("pttKeys").innerHTML = keycaps(s.hotkey);
     $("toggleKeys").innerHTML = keycaps(s.toggle_hotkey);
+    setFootModel(s.dictation_lang);
   });
   $("saveVocab").addEventListener("click", () => api() && api().save_vocab($("vocab").value));
   $("saveCorr").addEventListener("click", () => {
@@ -286,6 +300,7 @@ function setLang(lang, persist) {
   if (window.PWI18n) window.PWI18n.apply(lang);
   // Les textes posés par le script ne portent pas de data-i18n : on les refait.
   setStatus(currentStatus);
+  setFootModel();
   $("pttKeys").innerHTML = keycaps($("ptt").value);
   $("toggleKeys").innerHTML = keycaps($("toggle").value);
   const sel = $("device");

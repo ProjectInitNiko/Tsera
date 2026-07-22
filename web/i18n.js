@@ -63,8 +63,11 @@
     hint_corr: "Une correction par ligne : <b>erreur = remplacement</b> (insensible à la casse, mots entiers). Appliqué instantanément.",
     btn_savecorr: "Enregistrer les corrections",
 
-    // Pied de page
-    foot_brand: "100&nbsp;% local · Parakeet&nbsp;v3 · hors ligne",
+    // Pied de page — le nom du modèle est posé par le script (setFootModel)
+    foot_local: "100&nbsp;% local",
+    foot_offline: "hors ligne",
+    model_multi: "Parakeet&nbsp;v3",
+    model_ka: "Géorgien",
     btn_quit: "Quitter",
 
     // Chaînes posées par le script (statuts, touches, listes)

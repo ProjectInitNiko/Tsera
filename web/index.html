@@ -153,7 +153,9 @@
     </main>
 
     <footer class="foot">
-      <span class="foot__brand" data-i18n-html="foot_brand">100&nbsp;% local · Parakeet&nbsp;v3 · offline</span>
+      <!-- Le nom du modèle suit la langue de dictée : il est posé par le script
+           (setFootModel) ; les deux morceaux fixes restent traduits par i18n. -->
+      <span class="foot__brand"><span data-i18n-html="foot_local">100&nbsp;% local</span> · <span id="footModel">Parakeet&nbsp;v3</span> · <span data-i18n="foot_offline">offline</span></span>
       <button id="quit" class="foot__quit" data-i18n="btn_quit">Quit</button>
     </footer>
 
