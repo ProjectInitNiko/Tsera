@@ -1,4 +1,4 @@
-/* PersonalWhisper — UI web. Bridge pywebview + forme d'onde + interactions. */
+/* Tsera — UI web. Bridge pywebview + forme d'onde + interactions. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -12,6 +12,9 @@ const STATUS = {
   recording_ptt:    { led: "red",   word: "Listening",     rec: true,  wave: "recording" },
   recording_toggle: { led: "red",   word: "Hands-free",    rec: true,  wave: "recording" },
   processing:       { led: "amber", word: "Transcribing",  rec: false, wave: "processing" },
+  /* État persistant (modèle absent, échec de boot) : un toast de 2,4 s ne
+     suffit pas quand l'app ne peut pas fonctionner du tout. */
+  error:            { led: "red",   word: "Error",         rec: false, wave: "ready" },
 };
 
 const tr = (key, fallback) => (window.PWI18n ? window.PWI18n.t(key, fallback) : fallback);
@@ -38,7 +41,7 @@ window.PW = {
     else if (kind === "transcription") addTake(payload);
     else if (kind === "notice") toast(payload);
     else if (kind === "model_ready") { modelReady = true; setHeavyEnabled(true); }
-    else if (kind === "shown") { /* fenêtre ré-affichée */ }
+    else if (kind === "shown") refreshDevices();  // les micros ont pu changer
   },
 };
 
@@ -66,13 +69,19 @@ const KEYNAME = () => ({
   shift: tr("key_shift", "Shift"), space: tr("key_space", "Space"),
   "right ctrl": tr("key_rctrl", "Right Ctrl"), "right shift": tr("key_rshift", "Right Shift"),
 });
+/* Le raccourci est du texte libre (champ + config.json) inséré via innerHTML :
+   sans échappement, `ctrl+<img onerror=…>` s'exécuterait avec le bridge
+   pywebview complet sous la main. Seul point d'insertion non textContent. */
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+));
 function keycaps(hotkey) {
   if (!hotkey) return "";
   const names = KEYNAME();
   return hotkey.split("+").map((p) => {
     const k = p.trim().toLowerCase();
     const name = names[k] || (k.charAt(0).toUpperCase() + k.slice(1));
-    return `<span class="cap">${name}</span>`;
+    return `<span class="cap">${escapeHtml(name)}</span>`;
   }).join("");
 }
 
@@ -90,7 +99,7 @@ function addTake(d) {
   text.textContent = d.text || "";
   const copy = document.createElement("button");
   copy.className = "take__copy";
-  copy.textContent = "Copier";
+  copy.textContent = tr("hist_copy", "Copy");
   copy.onclick = () => { if (api()) api().copy_text(d.text || ""); };
   row.append(time, text, copy);
   const list = $("history");
@@ -218,6 +227,7 @@ function fillState(s) {
   sel.add(def);
   (s.devices || []).forEach((d) => sel.add(new Option(`${d.index} · ${d.name}`, String(d.index))));
   sel.value = s.device == null ? "" : String(s.device);
+  if (sel.selectedIndex < 0) sel.value = "";  // index configuré disparu → défaut
 
   $("sounds").checked = s.sounds !== false;
   $("overlay").checked = s.overlay !== false;
@@ -231,7 +241,15 @@ function fillState(s) {
   // Le géorgien n'est proposé que si son modèle est réellement sur le disque.
   $("dictationLang").value = s.dictation_lang === "ka" ? "ka" : "multi";
   const kaOpt = $("dictationLang").querySelector('option[value="ka"]');
-  if (kaOpt) kaOpt.disabled = s.has_georgian === false;
+  if (kaOpt) {
+    kaOpt.disabled = s.has_georgian === false;
+    // L'option grisée sans un mot d'explication laissait deviner pourquoi.
+    if (kaOpt.disabled) {
+      const hint = tr("ka_missing", "Georgian model not installed — see README");
+      kaOpt.title = hint;
+      $("dictationLang").title = hint;
+    }
+  }
   setFootModel(s.dictation_lang);
 
   $("vocab").value = s.vocab_text || "";
@@ -239,6 +257,22 @@ function fillState(s) {
 
   (s.history || []).forEach(addTake);
   setStatus(s.status || "loading");
+}
+
+/* Ré-énumère les micros sans toucher au reste de l'état. Appelé quand la
+   fenêtre revient du tray : brancher/débrancher un périphérique entre-temps
+   rendait la liste de ready() obsolète. */
+async function refreshDevices() {
+  if (!api() || !api().list_devices) return;
+  try {
+    const devices = await api().list_devices();
+    const sel = $("device");
+    const cur = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    (devices || []).forEach((d) => sel.add(new Option(`${d.index} · ${d.name}`, String(d.index))));
+    sel.value = cur;
+    if (sel.selectedIndex < 0) sel.value = "";
+  } catch (_) { /* bridge indisponible : la liste actuelle reste affichée */ }
 }
 
 function gatherSettings() {
@@ -305,6 +339,9 @@ function setLang(lang, persist) {
   $("toggleKeys").innerHTML = keycaps($("toggle").value);
   const sel = $("device");
   if (sel.options.length) sel.options[0].text = tr("mic_default", "System default");
+  document.querySelectorAll(".take__copy").forEach((b) => {
+    b.textContent = tr("hist_copy", "Copy");  // les prises déjà affichées
+  });
   if (persist && api()) api().set_lang(lang);
 }
 

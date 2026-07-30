@@ -1,5 +1,5 @@
 /* ============================================================
-   PersonalWhisper — interface « matériel de studio »
+   Tsera — interface « matériel de studio »
    Charbon chaud + ambre signal + rouge VU. Anton / Inter / Plex Mono.
    ============================================================ */
 
@@ -64,7 +64,7 @@ body::after {
   background:linear-gradient(180deg, rgba(255,255,255,.028), transparent);
 }
 .brand { display:flex; align-items:center; gap:11px; }
-.nk {
+.monogram {
   font-family:var(--font-display); font-size:16px; letter-spacing:.5px;
   color:#1A1206; background:linear-gradient(160deg, #FFC259, var(--amber) 55%, var(--amber-soft));
   padding:5px 8px 3px; border-radius:8px; line-height:1;

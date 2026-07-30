@@ -37,6 +37,7 @@
     // Historique
     hist_takes: "Prises",
     hist_clear: "Effacer",
+    hist_copy: "Copier",
     hist_empty: "Aucune prise pour l'instant.<br />Maintiens <b>Ctrl + Espace</b> et parle.",
 
     // Réglages
@@ -45,7 +46,7 @@
     hint_dictation: "Changer recharge le modèle, ce qui prend quelques secondes. Le vocabulaire custom est en alphabet latin : il ne s'applique pas en géorgien.",
     opt_multi: "Multilingue — Parakeet v3 (25 langues)",
     opt_ka: "ქართული — Géorgien",
-    ka_missing: "Modèle géorgien absent",
+    ka_missing: "Modèle géorgien absent — voir le README",
     lbl_ptt: "Raccourci push-to-talk",
     lbl_toggle: "Raccourci mains-libres (toggle)",
     lbl_mic: "Microphone",
@@ -77,6 +78,7 @@
     status_recording_ptt: "Écoute",
     status_recording_toggle: "Mains-libres",
     status_processing: "Transcription",
+    status_error: "Erreur",
     key_shift: "Maj",
     key_space: "Espace",
     key_rctrl: "Ctrl D",

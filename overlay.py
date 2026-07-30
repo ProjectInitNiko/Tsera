@@ -1,4 +1,4 @@
-"""HUD à la SuperWhisper — pastille en bas d'écran avec « NK » + vagues de son.
+"""HUD de dictée — pastille en bas d'écran avec « TS » + vagues de son.
 
 Tourne dans son propre thread tkinter (root Tk dédié) : la fenêtre principale
 est en WebView2 (pywebview), pas en tkinter, donc le HUD est indépendant. Les
@@ -130,7 +130,7 @@ class Overlay:
         # maison n'est installée sur le système, et tkinter ne sait charger
         # qu'une police installée — il retombait donc sur Segoe UI, la police par
         # défaut de Windows, qu'on ne veut nulle part. PIL, lui, lit un fichier.
-        self._nk_photo = None
+        self._mono_photo = None
         if _ORBS_OK:
             try:
                 font = ImageFont.truetype(
@@ -138,16 +138,16 @@ class Overlay:
                                  "assets", "inter-600.ttf"), 19)
                 im = Image.new("RGB", (44, _H), _PILL_RGB)
                 dr = ImageDraw.Draw(im)
-                box = dr.textbbox((0, 0), "NK", font=font)
+                box = dr.textbbox((0, 0), "TS", font=font)
                 dr.text(((44 - (box[2] - box[0])) / 2 - box[0],
                          (_H - (box[3] - box[1])) / 2 - box[1]),
-                        "NK", font=font, fill=_ACCENT)
-                self._nk_photo = ImageTk.PhotoImage(im)
-                canvas.create_image(36, _H // 2, image=self._nk_photo)
+                        "TS", font=font, fill=_ACCENT)
+                self._mono_photo = ImageTk.PhotoImage(im)
+                canvas.create_image(36, _H // 2, image=self._mono_photo)
             except Exception:
-                self._nk_photo = None
-        if self._nk_photo is None:  # filet : mieux vaut un sigle que pas de sigle
-            canvas.create_text(36, _H // 2, text="NK", fill=_ACCENT,
+                self._mono_photo = None
+        if self._mono_photo is None:  # filet : mieux vaut un sigle que pas de sigle
+            canvas.create_text(36, _H // 2, text="TS", fill=_ACCENT,
                                font=("Arial", 15, "bold"))
 
         # Orbe d'état : une seule PhotoImage réutilisée (paste par frame) plutôt

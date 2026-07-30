@@ -1,4 +1,4 @@
-"""Génère icon.ico (raccourci Bureau / barre système) — pastille « NK » ambre.
+"""Génère icon.ico (raccourci Bureau / barre système) — pastille « TS » ambre.
 
 À relancer si on veut retoucher le visuel :  python make_icon.py
 """
@@ -22,7 +22,7 @@ def _font(size: int):
 
 
 def render(px: int, fg=AMBER) -> Image.Image:
-    """Pastille « NK ». `fg` colore le sigle : la barre système réutilise ce
+    """Pastille « TS ». `fg` colore le sigle : la barre système réutilise ce
     dessin en rouge pendant l'enregistrement plutôt que d'en avoir un autre."""
     img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -30,7 +30,7 @@ def render(px: int, fg=AMBER) -> Image.Image:
     radius = round(px * 0.22)
     d.rounded_rectangle((pad, pad, px - pad, px - pad), radius=radius, fill=BG)
 
-    text = "NK"
+    text = "TS"
     font = _font(round(px * 0.42))
     box = d.textbbox((0, 0), text, font=font)
     tw, th = box[2] - box[0], box[3] - box[1]

@@ -1,8 +1,16 @@
-# PersonalWhisper
+# Tsera
 
-Dictée vocale locale push-to-talk pour Windows — clone maison de SuperWhisper.
+**Dictée vocale 100 % locale pour Windows.** Aucune donnée ne quitte la machine,
+aucun compte, aucun abonnement, aucune connexion requise.
 
-**Maintenir `Ctrl + Espace` → parler → relâcher** : le texte se colle au curseur, dans n'importe quelle app. Pendant la dictée, un HUD « NK » avec les vagues de son s'affiche en bas d'écran (puis des points pulsants pendant la transcription). 100 % local et offline (Parakeet-tdt-0.6b-v3 via sherpa-onnx, CPU).
+> *წერა* — « écrire » en géorgien.
+
+Les bons outils de dictée par IA vivent sur macOS : Superwhisper, Wispr Flow,
+VoiceInk, MacWhisper. Sous Windows, il n'y a presque rien. Tsera comble ce trou,
+et fait au passage une chose que personne d'autre ne fait : **la dictée en
+géorgien**.
+
+**Maintenir `Ctrl + Espace` → parler → relâcher** : le texte se colle au curseur, dans n'importe quelle app. Pendant la dictée, un HUD « TS » avec les vagues de son s'affiche en bas d'écran (puis des points pulsants pendant la transcription). 100 % local et offline (Parakeet-tdt-0.6b-v3 via sherpa-onnx, CPU).
 
 **Mode mains-libres (toggle) : `Ctrl + Shift + Espace`** — un appui démarre la dictée, un second l'arrête. Pas besoin de maintenir : on peut lâcher les touches et parler entre les deux. Sécurité : un toggle oublié se coupe seul à `max_duration_s`.
 
@@ -34,22 +42,33 @@ woff2 sous `file://`).
 
 ## Config (`config.json`)
 
+`config.json` et `vocab.txt` sont **locaux** (gitignorés — ce sont tes données) :
+ils sont créés au premier lancement depuis `config.example.json` et
+`vocab.example.txt`. Un fichier absent, incomplet ou corrompu ne bloque jamais
+le démarrage : les défauts ci-dessous s'appliquent, et un `config.json`
+illisible est mis de côté en `config.json.broken`.
+
 | Clé | Défaut | Description |
 | --- | --- | --- |
 | `hotkey` | `ctrl+space` | Push-to-talk : combo `modificateurs+touche` (la touche finale est avalée pendant la dictée) ou touche seule (ex. `right ctrl`) |
 | `toggle_hotkey` | `ctrl+shift+space` | Mode mains-libres : 1er appui démarre, 2e arrête. `null` ou `""` pour désactiver. Peut partager le trigger du `hotkey` |
-| `model_dir` | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | Dossier du modèle |
+| `model_dir` | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | Dossier du modèle multilingue |
+| `model_dir_ka` | `sherpa-onnx-stt_ka_…` | Dossier du modèle géorgien (optionnel) |
+| `dictation_lang` | `multi` | `multi` (Parakeet, 25 langues) ou `ka` (géorgien) |
 | `num_threads` | `4` | Threads CPU pour l'inférence |
+| `sample_rate` | `16000` | Fréquence d'échantillonnage attendue par les modèles |
 | `min_duration_s` | `0.3` | En dessous = appui accidentel, ignoré |
 | `max_duration_s` | `120` | Coupe de sécurité |
 | `min_peak` | `0.008` | Pic audio minimal — en dessous = silence, rien n'est collé (évite les hallucinations du beam search sur le bruit de fond) |
 | `sounds` | `true` | Bips de feedback (début / erreur) |
 | `restore_clipboard` | `true` | Restaure le presse-papiers après collage |
-| `overlay` | `true` | HUD « NK » + vagues de son en bas d'écran pendant la dictée |
-| `device` | `null` (absent) | Index du micro (voir la liste dans Réglages) ; `null`/absent = défaut système |
+| `overlay` | `true` | HUD « TS » + vagues de son en bas d'écran pendant la dictée |
+| `device` | `null` | Index du micro (voir la liste dans Réglages) ; `null` = défaut système. Si l'ouverture échoue (micro pris par une autre app, entrée WASAPI qui refuse 16 kHz), repli automatique : défaut système, puis premier micro fonctionnel — avec notice |
+| `device_name` | `null` | Écrit automatiquement avec `device` : l'identité stable du micro est son **nom**, les indices se décalent au moindre branchement |
 | `vocab_file` | `vocab.txt` | Vocabulaire custom (un mot/expression par ligne, `#` = commentaire) |
 | `vocab_score` | `2.0` | Force du biasing (validé : 2 = doux, 4 = fort, 8 = le mot s'invite partout) |
 | `corrections` | `{...}` | Remplacements post-transcription, insensibles à la casse, mots entiers (casse finale + cafouillages connus) |
+| `lang` | `en` | Langue de l'interface (`en` / `fr`) |
 
 ## Vocabulaire custom
 
@@ -57,10 +76,10 @@ Deux couches complémentaires :
 
 1. **`vocab.txt`** — les mots listés sont boostés dans le décodeur (hotwords sherpa-onnx,
    passe automatiquement en `modified_beam_search`, ~1,2× plus lent que greedy).
-   Validé : « Mechazic → Mecazic », « Adomias → Adomeos », « Superbase → Supabase ».
+   Validé : « Superbase → Supabase », « Live Kit → LiveKit ».
    Fichier vide ou absent = greedy (comportement d'origine).
 2. **`corrections`** (config.json) — post-traitement déterministe : casse
-   (`perseus` → `PERSEUS`) et cafouillages récurrents (`robo dk` → `RoboDK`).
+   (`supabase` → `Supabase`) et cafouillages récurrents (`live kit` → `LiveKit`).
    Quand un nom sort mal écrit à l'usage, ajouter l'erreur observée ici.
 
 Note technique : le modèle exporté n'embarque pas son sentencepiece ; un
@@ -73,7 +92,7 @@ dossier du modèle pour encoder les hotwords — biasing vérifié effectif avec
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-Crée un **raccourci sur le Bureau** (`PersonalWhisper`, icône « NK », ouvre la
+Crée un **raccourci sur le Bureau** (`Tsera`, icône « TS », ouvre la
 fenêtre) **et** un raccourci dans `shell:startup` pour le **démarrage automatique
 à chaque login Windows** (avec `--tray` : démarre réduit, sans ouvrir la fenêtre).
 Les deux lancent via `pythonw.exe` (aucune console). Options :
@@ -91,7 +110,7 @@ Clic droit sur l'icône de la barre système → **Quitter**.
 
 ```
 python -m venv .venv
-.venv\Scripts\pip install sherpa-onnx sounddevice numpy keyboard pyperclip pystray pillow pywebview
+.venv\Scripts\pip install -r requirements.txt
 curl.exe -L --ssl-no-revoke -o parakeet-v3-int8.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 tar -xjf parakeet-v3-int8.tar.bz2
 ```
@@ -140,16 +159,32 @@ curl.exe -L --ssl-no-revoke -O https://huggingface.co/LukeJacob2023/sherpa-onnx-
 
 Sans ce dossier, l'option reste grisée dans les réglages.
 
+## Licence
+
+Tsera est publié sous **licence MIT** (voir [`LICENSE`](LICENSE)). Tu peux
+l'utiliser, le modifier, le redistribuer et le vendre, y compris dans un produit
+fermé, à condition de conserver la notice de copyright.
+
+Cette licence couvre **le code de Tsera uniquement**. Les modèles, les polices et
+les bibliothèques embarquées gardent la leur, dont deux exigent une attribution
+explicite. Tout est listé dans [`NOTICE.md`](NOTICE.md), à conserver en cas de
+redistribution.
+
 ## Crédits
 
-- **Modèle géorgien** : NVIDIA `stt_ka_fastconformer_hybrid_large_pc`, licence [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Modèle par défaut** : NVIDIA [`parakeet-tdt-0.6b-v3`](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), licence [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) — export ONNX int8 par [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
+- **Modèle géorgien** : NVIDIA [`stt_ka_fastconformer_hybrid_large_pc`](https://huggingface.co/nvidia/stt_ka_fastconformer_hybrid_large_pc), licence [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) — export ONNX par [LukeJacob2023](https://huggingface.co/LukeJacob2023/sherpa-onnx-stt_ka_fastconformer_hybrid_large_pc).
 - **Orbes d'état** (`orbs.py`, `web/orbs.js`) : portage de [thinking-orbs](https://github.com/Jakubantalik/thinking-orbs) de Jakub Antalik, licence MIT — notice complète en tête de chaque fichier.
+- **Polices** : Anton et Inter sous OFL-1.1, Roboto Mono sous Apache-2.0 — détail dans [`web/fonts/LICENSES.md`](web/fonts/LICENSES.md).
+
+Tsera est un projet indépendant, sans affiliation avec Superwhisper, Wispr Flow,
+NVIDIA ou Microsoft.
 
 ## Roadmap
 
 - [ ] Modes IA (reformulation mail / note / prompt custom via LLM) — décidé 09/07 :
       déclenchement par 2e raccourci dédié (Ctrl+Alt+Space), moteur LLM à choisir
       le moment venu (API Haiku ~0,1 ¢/usage vs Ollama local gratuit mais lent CPU)
-- [x] Vocabulaire custom (noms propres : PERSEUS, Mecazic, GHL…) — hotwords + corrections
+- [x] Vocabulaire custom (noms propres, marques, jargon) — hotwords + corrections
 - [x] Toggle mains-libres (Ctrl+Shift+Espace) en plus du push-to-talk
 - [x] Interface (statut, historique, réglages, éditeurs vocab/corrections) + réduction au tray

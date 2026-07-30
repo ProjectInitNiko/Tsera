@@ -1,0 +1,17 @@
+# Tsera — dictée vocale locale push-to-talk pour Windows
+# Python 3.12+
+#
+#   python -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt
+#
+# Le modèle de transcription n'est PAS une dépendance pip : il se télécharge
+# séparément (~640 Mo). Voir la section « Setup depuis zéro » du README.
+
+sherpa-onnx==1.13.4
+sounddevice==0.5.5
+numpy==2.5.1
+keyboard==0.13.5
+pyperclip==1.11.0
+pystray==0.19.5
+pillow==12.3.0
+pywebview==6.2.1

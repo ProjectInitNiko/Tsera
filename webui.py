@@ -1,4 +1,4 @@
-"""Bridge pywebview ↔ moteur PersonalWhisper.
+"""Bridge pywebview ↔ moteur Tsera.
 
 L'objet `Api` est exposé au JS via `js_api`. pywebview expose au JS **toutes les
 méthodes publiques** de cet objet et récurserait dans ses attributs-objets — d'où
@@ -14,6 +14,7 @@ avant que le JS n'ait signalé `ready()` sont tamponnés puis rejoués.
 
 import json
 import os
+import queue
 import threading
 
 import pyperclip
@@ -36,6 +37,12 @@ class Api:
         self._history = []
         self._maximized = False
         self._fullscreen = False
+        # evaluate_js bloque sur un aller-retour vers le thread UI WinForms.
+        # Appelé depuis le hook clavier (via on_event), il gelait le clavier
+        # système entier. Une file + un unique thread pompe : _push devient
+        # fire-and-forget pour tous les appelants, l'ordre est préservé.
+        self._js_q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._js_pump, daemon=True).start()
 
     def _attach(self, engine, window):
         self._engine = engine
@@ -57,13 +64,20 @@ class Api:
         self._push(kind, payload)
 
     def _push(self, kind: str, payload):
-        try:
-            self._window.evaluate_js(
-                "window.PW && window.PW.on(%s, %s)"
-                % (json.dumps(kind), json.dumps(payload))
-            )
-        except Exception:
-            pass
+        self._js_q.put((kind, payload))
+
+    def _js_pump(self):
+        while True:
+            kind, payload = self._js_q.get()
+            if self._window is None:
+                continue
+            try:
+                self._window.evaluate_js(
+                    "window.PW && window.PW.on(%s, %s)"
+                    % (json.dumps(kind), json.dumps(payload))
+                )
+            except Exception:
+                pass
 
     def _read_vocab(self) -> str:
         path = _app.vocab_path(self._cfg)
@@ -112,6 +126,11 @@ class Api:
             self._engine.apply_settings(s)
         return True
 
+    def list_devices(self):
+        """Ré-énumère les micros — la liste de ready() devient obsolète dès
+        qu'un périphérique est branché ou débranché."""
+        return [{"index": i, "name": n} for i, n in _app.list_input_devices()]
+
     def save_vocab(self, text: str):
         if self._engine:
             self._engine.save_vocab_text(text)
@@ -136,8 +155,10 @@ class Api:
         self._cfg["lang"] = lang
         try:
             _app.save_config(self._cfg)
-        except Exception:
-            pass
+        except Exception as e:
+            # Avaler l'échec en silence = langue revenue à l'anglais au
+            # prochain lancement sans explication. On prévient.
+            self._emit("notice", _app.tr(lang, "save_error").format(e))
         if self._engine:
             self._engine.refresh_tray_menu(lang)
         return lang

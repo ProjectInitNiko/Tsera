@@ -17,13 +17,19 @@ def _ensure_bpe_vocab(model_dir: str) -> str:
     """
     path = os.path.join(model_dir, "bpe_from_tokens.vocab")
     if not os.path.exists(path):
+        # Écriture atomique : le « if not exists » ci-dessus fait office de
+        # cache — un fichier partiel (process tué mi-écriture) serait sinon
+        # réutilisé tel quel à tous les lancements suivants, et le biasing du
+        # vocabulaire dégraderait en silence.
+        tmp = path + ".tmp"
         with open(os.path.join(model_dir, "tokens.txt"), encoding="utf-8") as f, open(
-            path, "w", encoding="utf-8"
+            tmp, "w", encoding="utf-8"
         ) as out:
             for line in f:
                 piece = line.rstrip("\n").split()
                 if piece and not piece[0].startswith("<"):  # saute <blk>, <unk>…
                     out.write(f"{piece[0]}\t-1.0\n")
+        os.replace(tmp, path)
     return path
 
 
@@ -80,6 +86,14 @@ class Transcriber:
         t0 = time.perf_counter()
         self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(**kw)
         self.load_time = time.perf_counter() - t0
+        # Le fichier hotwords n'est lu qu'à la construction : le laisser dans
+        # %TEMP% accumulerait le vocabulaire personnel en clair à chaque
+        # rechargement — à rebours du positionnement 100 % local et privé.
+        if vocab:
+            try:
+                os.unlink(kw["hotwords_file"])
+            except OSError:
+                pass
 
     def transcribe(self, samples: np.ndarray) -> str:
         """samples : float32 mono à self.sample_rate, valeurs dans [-1, 1]."""

@@ -3,3 +3,13 @@ __pycache__/
 *.tar.bz2
 sherpa-onnx-nemo-parakeet-*/
 sherpa-onnx-stt_ka_*/
+
+# État utilisateur — données personnelles, jamais versionnées.
+# Créés au premier lancement depuis config.example.json / vocab.example.txt.
+config.json
+config.json.tmp
+config.json.broken
+vocab.txt
+
+# Script de diagnostic local (hors du dépôt public)
+test_keys.py

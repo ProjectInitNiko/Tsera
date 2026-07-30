@@ -1,4 +1,4 @@
-"""PersonalWhisper — dictée locale (push-to-talk + toggle mains-libres) avec UI.
+"""Tsera — dictée locale (push-to-talk + toggle mains-libres) avec UI.
 
 Deux raccourcis globaux :
   - maintenir Ctrl+Espace          → push-to-talk
@@ -16,7 +16,9 @@ Tout tourne en local (Parakeet v3 via sherpa-onnx, CPU). Aucune donnée ne sort 
 
 import json
 import os
+import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -65,15 +67,93 @@ def config_path() -> str:
     return os.path.join(APP_DIR, "config.json")
 
 
+# Défauts complets : chaque clé lue ailleurs par cfg[...] doit exister ici.
+# Un config.json partiel, absent ou corrompu ne doit JAMAIS empêcher le boot.
+DEFAULTS: dict = {
+    "hotkey": "ctrl+space",
+    "toggle_hotkey": "ctrl+shift+space",
+    "model_dir": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+    "model_dir_ka": MODEL_DIR_KA,
+    "dictation_lang": "multi",
+    "num_threads": 4,
+    "sample_rate": 16000,
+    "device": None,
+    "device_name": None,
+    "min_duration_s": 0.3,
+    "max_duration_s": 120,
+    "min_peak": 0.008,
+    "sounds": True,
+    "restore_clipboard": True,
+    "overlay": True,
+    "vocab_file": "vocab.txt",
+    "vocab_score": 2.0,
+    "corrections": {},
+    "lang": "en",
+}
+
+_CONFIG_LOCK = threading.Lock()  # save_config est appelé depuis plusieurs threads
+
+
+def _alert(msg: str):
+    """Erreur visible même sous pythonw (pas de console : print serait muet)."""
+    log(msg)
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, msg, "Tsera", 0x00000030)  # MB_ICONWARNING
+    except Exception:
+        pass
+
+
 def load_config() -> dict:
-    with open(config_path(), encoding="utf-8") as f:
-        return json.load(f)
+    """DÉFAUTS ← config.json (créé depuis config.example.json au 1er lancement).
+
+    Un fichier absent, tronqué ou invalide ne brique pas l'app : on repart des
+    défauts, on met le fichier fautif de côté (.broken) et on prévient."""
+    cfg = dict(DEFAULTS)
+    path = config_path()
+    if not os.path.exists(path):
+        for src, dst in (
+            ("config.example.json", path),
+            ("vocab.example.txt", os.path.join(APP_DIR, "vocab.txt")),
+        ):
+            example = os.path.join(APP_DIR, src)
+            if not os.path.exists(dst) and os.path.exists(example):
+                try:
+                    shutil.copyfile(example, dst)
+                except OSError:
+                    pass
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            cfg.update(data)
+    except FileNotFoundError:
+        save_config(cfg)  # pas d'exemple non plus : écrit les défauts
+    except (OSError, json.JSONDecodeError) as e:
+        _alert(f"config.json illisible ({e}).\nRéglages par défaut utilisés ; "
+               f"l'ancien fichier est conservé en config.json.broken.")
+        try:
+            os.replace(path, path + ".broken")
+        except OSError:
+            pass
+        save_config(cfg)
+    return cfg
 
 
 def save_config(cfg: dict):
-    with open(config_path(), "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    """Écriture atomique (tmp + os.replace) : un crash ou un quit_app en plein
+    milieu ne peut pas laisser un config.json tronqué qui bloquerait tous les
+    lancements suivants."""
+    path = config_path()
+    tmp = path + ".tmp"
+    with _CONFIG_LOCK:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
 
 
 def vocab_path(cfg: dict) -> str:
@@ -95,6 +175,7 @@ class Recorder:
     def __init__(self, sample_rate: int, device=None, on_level=None):
         self.sample_rate = sample_rate
         self.device = device
+        self.fallback: str | None = None  # nom du micro de repli, le cas échéant
         self._chunks: list[np.ndarray] = []
         self._active = False
         self._lock = threading.Lock()
@@ -102,34 +183,91 @@ class Recorder:
         self._stream = None
         self._open()
 
-    def _open(self):
-        self._stream = sd.InputStream(
+    def _try_open(self, device):
+        stream = sd.InputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
-            device=self.device,
+            device=device,
             callback=self._callback,
         )
-        self._stream.start()
+        stream.start()
+        self._stream = stream
+
+    def _open(self):
+        """Ouvre `self.device`, sinon replis : défaut système, puis premier
+        micro qui s'ouvre RÉELLEMENT. check_input_settings ne suffit pas — il
+        valide un format sans ouvrir, et un périphérique tenu par une autre
+        app (Discord…) passe le check puis échoue à l'ouverture. Un repli est
+        mémorisé dans `self.fallback` pour que l'Engine prévienne."""
+        self.fallback = None
+        last_error: Exception | None = None
+        candidates: list = [self.device]
+        if self.device is not None:
+            candidates.append(None)  # défaut système
+        for cand in candidates:
+            try:
+                self._try_open(cand)
+                if cand != self.device:
+                    try:
+                        self.fallback = sd.query_devices(kind="input")["name"]
+                    except Exception:
+                        self.fallback = "system default"
+                return
+            except Exception as e:
+                last_error = e
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            devices = []
+        for i, dev in enumerate(devices):
+            if dev.get("max_input_channels", 0) > 0 and i != self.device:
+                try:
+                    self._try_open(i)
+                    self.fallback = dev["name"]
+                    return
+                except Exception as e:
+                    last_error = e
+        self._stream = None
+        raise last_error if last_error is not None else RuntimeError("no input device")
+
+    def alive(self) -> bool:
+        """Vrai si le flux semble vivant. Certains hôtes audio laissent active
+        à True après un débranchement : le vrai détecteur reste « zéro
+        échantillon capté » dans _stop_and_process."""
+        try:
+            return self._stream is not None and bool(self._stream.active)
+        except Exception:
+            return False
+
+    def close(self):
+        self._active = False
+        try:
+            if self._stream is not None:
+                self._stream.stop()
+                self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
 
     def set_device(self, device):
         """Rouvre le flux sur un autre micro (à faire à l'arrêt, pas en dictée)."""
-        self._active = False
-        try:
-            self._stream.stop()
-            self._stream.close()
-        except Exception:
-            pass
+        self.close()
         self.device = device
         self._open()
 
     def _callback(self, indata, frames, time_info, status):
-        if self._active:
-            chunk = indata[:, 0].copy()
-            with self._lock:
-                self._chunks.append(chunk)
-            if self._on_level is not None:
-                self._on_level(float(np.sqrt(np.mean(chunk * chunk))))
+        # Une exception qui s'échappe d'un callback PortAudio tue le flux
+        # définitivement (error=paAbort) — et sous pythonw, sans traceback.
+        try:
+            if self._active:
+                chunk = indata[:, 0].copy()
+                with self._lock:
+                    self._chunks.append(chunk)
+                if self._on_level is not None:
+                    self._on_level(float(np.sqrt(np.mean(chunk * chunk))))
+        except Exception:
+            pass
 
     def start(self):
         with self._lock:
@@ -144,8 +282,12 @@ class Recorder:
             return np.concatenate(self._chunks)
 
 
+_RESTORE_TOKEN = None  # dernier paste_text en date : seul son restore est valable
+
+
 def paste_text(text: str, restore_clipboard: bool):
     """Colle `text` au curseur via le presse-papiers + Ctrl+V simulé."""
+    global _RESTORE_TOKEN
     old = None
     if restore_clipboard:
         try:
@@ -156,11 +298,21 @@ def paste_text(text: str, restore_clipboard: bool):
     time.sleep(0.05)
     keyboard.send("ctrl+v")
     if restore_clipboard and old is not None:
-        # Laisse le temps à l'app cible de lire le presse-papiers avant restauration.
+        # Laisse le temps à l'app cible de lire le presse-papiers avant
+        # restauration. Deux gardes contre la restauration aveugle : un token
+        # (chaque nouveau collage invalide les restores en attente) et une
+        # vérification de contenu (si l'utilisateur — ou le bouton Copier de
+        # l'historique — a écrit autre chose entre-temps, on n'écrase pas).
+        token = object()
+        _RESTORE_TOKEN = token
+
         def _restore():
             time.sleep(0.6)
+            if _RESTORE_TOKEN is not token:
+                return
             try:
-                pyperclip.copy(old)
+                if pyperclip.paste() == text:
+                    pyperclip.copy(old)
             except Exception:
                 pass
 
@@ -171,7 +323,7 @@ def paste_text(text: str, restore_clipboard: bool):
 # langue par défaut de l'app ; l'interface, elle, se traduit dans web/i18n.js.
 STRINGS = {
     "en": {
-        "open": "Open PersonalWhisper",
+        "open": "Open Tsera",
         "quit": "Quit",
         "copied": "Copied to clipboard",
         "startup_error": "Startup error: {}",
@@ -181,9 +333,15 @@ STRINGS = {
         "corr_saved": "Corrections saved",
         "reload_error": "Reload error: {}",
         "stt_error": "Transcription error: {}",
+        "bad_hotkey": "Invalid hotkey \"{}\" — settings not saved",
+        "mic_fallback": "Configured microphone unavailable — using: {}",
+        "mic_none": "No working microphone found ({}). Dictation paused — plug one in and try again.",
+        "mic_dead": "No audio captured — the microphone stream was dead. Reopened, try again.",
+        "model_missing": "Model folder missing: {}. See README (Setup) to download it, then restart.",
+        "save_error": "Could not save settings: {}",
     },
     "fr": {
-        "open": "Ouvrir PersonalWhisper",
+        "open": "Ouvrir Tsera",
         "quit": "Quitter",
         "copied": "Copié dans le presse-papiers",
         "startup_error": "Erreur au démarrage : {}",
@@ -193,6 +351,12 @@ STRINGS = {
         "corr_saved": "Corrections enregistrées",
         "reload_error": "Erreur de rechargement : {}",
         "stt_error": "Erreur de transcription : {}",
+        "bad_hotkey": "Raccourci invalide « {} » — réglages non enregistrés",
+        "mic_fallback": "Micro configuré indisponible — bascule sur : {}",
+        "mic_none": "Aucun micro fonctionnel ({}). Dictée en pause — branche un micro et réessaie.",
+        "mic_dead": "Aucun audio capté — le flux micro était mort. Rouvert, réessaie.",
+        "model_missing": "Dossier du modèle absent : {}. Voir le README (Setup) pour le télécharger, puis relance.",
+        "save_error": "Impossible d'enregistrer les réglages : {}",
     },
 }
 
@@ -202,7 +366,7 @@ def tr(lang: str, key: str) -> str:
 
 
 def make_icon(recording: bool) -> Image.Image:
-    """Icône tray : la pastille « NK », ambre au repos, rouge VU en dictée.
+    """Icône tray : la pastille « TS », ambre au repos, rouge VU en dictée.
 
     Même dessin que `icon.ico` (raccourci Bureau) — une seule définition du
     sigle, dans make_icon.py, pour que les deux ne divergent jamais.
@@ -219,15 +383,62 @@ def compile_corrections(corrections: dict):
 
 
 def list_input_devices() -> list[tuple[int, str]]:
-    """(index, nom) des périphériques d'entrée disponibles."""
+    """(index, libellé) des entrées disponibles. Windows expose chaque micro
+    3-4 fois (MME, DirectSound, WASAPI, WDM-KS) : le nom de l'hôte audio est
+    ajouté au libellé pour que les doublons soient distinguables."""
     out = []
     try:
+        apis = sd.query_hostapis()
         for i, dev in enumerate(sd.query_devices()):
             if dev.get("max_input_channels", 0) > 0:
-                out.append((i, dev["name"]))
+                label = dev["name"]
+                try:
+                    label = f"{dev['name']} · {apis[dev['hostapi']]['name']}"
+                except Exception:
+                    pass
+                out.append((i, label))
     except Exception:
         pass
     return out
+
+
+def resolve_device(cfg: dict):
+    """Index PortAudio du micro configuré. L'identité stable est le NOM :
+    les indices se décalent dès qu'un périphérique apparaît ou disparaît, donc
+    un index brut peut désigner silencieusement un autre micro au lancement
+    suivant. L'index stocké ne sert que de préférence quand le nom colle."""
+    name = cfg.get("device_name")
+    idx = cfg.get("device")
+    if not name:
+        return idx  # config historique (index brut) ou None = défaut système
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    if isinstance(idx, int) and 0 <= idx < len(devices):
+        d = devices[idx]
+        if d.get("max_input_channels", 0) > 0 and d.get("name") == name:
+            return idx
+    for i, d in enumerate(devices):
+        if d.get("max_input_channels", 0) > 0 and d.get("name") == name:
+            return i
+    return None  # micro configuré introuvable → défaut système
+
+
+def validate_hotkey(combo: str) -> str | None:
+    """None si le combo est utilisable, sinon le fragment fautif.
+
+    Vérifie exactement ce que bind_hotkeys installera (le trigger passe par
+    hook_key) et ce que le hook interrogera (les modificateurs passent par
+    is_pressed) : les deux résolvent via keyboard.key_to_scan_codes."""
+    for part in (p.strip() for p in combo.split("+")):
+        if not part:
+            return combo
+        try:
+            keyboard.key_to_scan_codes(part)
+        except Exception:
+            return part
+    return None
 
 
 class Engine:
@@ -248,18 +459,59 @@ class Engine:
         self.record_mode: str | None = None  # "ptt" | "toggle"
         self.record_started_at = 0.0
         self.busy = False
+        self.reloading = False  # échange de modèle en cours : dictée en pause
         self.icon: pystray.Icon | None = None
         self.build_tray_menu = None  # posé par main() : (lang) → pystray.Menu
         self.status = "loading"
         self.stt: Transcriber | None = None
         self._held: dict[str, bool] = {}
+        self._acted: dict[str, bool] = {}  # ce maintien a déjà déclenché son action
         self._state_lock = threading.Lock()
         self._corrections = compile_corrections(self.cfg.get("corrections", {}))
-        self.recorder = Recorder(
-            self.cfg["sample_rate"],
-            device=self.cfg.get("device"),
-            on_level=self.overlay.push_level,
-        )
+        # Les hooks clavier tournent DANS la procédure WH_KEYBOARD_LL de
+        # Windows : tout travail lent là-dedans (tray PIL, overlay, evaluate_js,
+        # numpy) gèle le clavier système entier, et au-delà de
+        # LowLevelHooksTimeout (~200 ms) Windows retire le hook sans un mot.
+        # Les hooks ne font donc que DÉCIDER ; les actions passent par cette
+        # file, drainée par un unique worker (FIFO = ordre press/release sûr).
+        self._work_q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._work_loop, daemon=True).start()
+        self.recorder = self._make_recorder()
+
+    def _work_loop(self):
+        while True:
+            fn = self._work_q.get()
+            try:
+                fn()
+            except Exception as e:
+                log(f"[worker] {e}")
+
+    def _defer(self, fn):
+        self._work_q.put(fn)
+
+    def _make_recorder(self) -> Recorder | None:
+        """Ouvre le micro résolu (avec replis) ; None si rien ne s'ouvre.
+        L'app vit quand même — la dictée retentera au prochain appui."""
+        try:
+            rec = Recorder(
+                self.cfg["sample_rate"],
+                device=resolve_device(self.cfg),
+                on_level=self.overlay.push_level,
+            )
+        except Exception as e:
+            self.on_event("notice", tr(self.cfg.get("lang", "en"), "mic_none").format(e))
+            return None
+        if rec.fallback:
+            self.on_event(
+                "notice", tr(self.cfg.get("lang", "en"), "mic_fallback").format(rec.fallback)
+            )
+        return rec
+
+    def _reopen_recorder(self):
+        old, self.recorder = self.recorder, None
+        if old is not None:
+            old.close()
+        self.recorder = self._make_recorder()
 
     def refresh_tray_menu(self, lang: str):
         """Réécrit le menu de la barre système dans la langue choisie."""
@@ -281,9 +533,9 @@ class Engine:
 
     def load_model(self):
         georgian = self.cfg.get("dictation_lang") == "ka"
-        # Le vocabulaire custom (PERSEUS, Mecazic…) est écrit en alphabet latin :
-        # le modèle géorgien n'a aucun token pour l'encoder, le biasing n'aurait
-        # rien à quoi s'accrocher. On le laisse de côté dans ce mode.
+        # Le vocabulaire custom (noms propres, marques) est écrit en alphabet
+        # latin : le modèle géorgien n'a aucun token pour l'encoder, le biasing
+        # n'aurait rien à quoi s'accrocher. On le laisse de côté dans ce mode.
         vocab = [] if georgian else load_vocab(self.cfg)
         log("Chargement du modèle…")
         self.stt = Transcriber(
@@ -299,6 +551,8 @@ class Engine:
 
     def reload_async(self):
         """Reconstruit le transcriber (nouveau vocab / score) sans figer l'UI."""
+        self.reloading = True  # bloque _start : pas de dictée pendant l'échange
+
         def _work():
             self._set_status("reloading")
             try:
@@ -308,7 +562,17 @@ class Engine:
                 log(f"Erreur reload : {e}")
                 self.on_event("notice", tr(self.cfg.get("lang", "en"), "reload_error").format(e))
             finally:
-                self._set_status("ready")
+                self.reloading = False
+                # Pas de « ready » en dur : si une dictée ou une transcription
+                # est en cours à cet instant, on réaffiche son état réel.
+                with self._state_lock:
+                    if self.recording:
+                        s = "recording_toggle" if self.record_mode == "toggle" else "recording_ptt"
+                    elif self.busy:
+                        s = "processing"
+                    else:
+                        s = "ready"
+                self._set_status(s)
         threading.Thread(target=_work, daemon=True).start()
 
     # --- Feedback ------------------------------------------------------------
@@ -329,10 +593,18 @@ class Engine:
 
     def _start(self, mode: str):
         with self._state_lock:
-            if self.recording or self.busy or self.stt is None:
+            if self.recording or self.busy or self.reloading or self.stt is None:
                 return
             self.recording = True
             self.record_mode = mode
+        if self.recorder is None or not self.recorder.alive():
+            self._reopen_recorder()  # micro branché/libéré depuis le dernier échec
+            if self.recorder is None:
+                with self._state_lock:
+                    self.recording = False
+                    self.record_mode = None
+                self.beep(200, 300)
+                return
         self.record_started_at = time.monotonic()
         self.recorder.start()
         self.set_tray(True)
@@ -357,11 +629,22 @@ class Engine:
         peak = float(np.abs(samples).max()) if samples.size else 0.0
         log(f"[debug] stop ({mode}) {duration:.2f}s, {samples.size} éch., pic {peak:.3f}")
 
-        if duration < self.cfg["min_duration_s"] or samples.size == 0:
+        if duration < self.cfg["min_duration_s"]:
             self.busy = False
             self.overlay.hide()
             self._set_status("ready")
             return  # appui accidentel
+        if samples.size == 0:
+            # Durée réelle mais zéro échantillon : le flux micro est mort
+            # (débranché, pris par une autre app) sans que PortAudio prévienne.
+            # Bip + notice + réouverture, au lieu de jeter la dictée en silence.
+            self.busy = False
+            self.overlay.hide()
+            self.beep(200, 300)
+            self.on_event("notice", tr(self.cfg.get("lang", "en"), "mic_dead"))
+            self._reopen_recorder()
+            self._set_status("ready")
+            return
         if peak < self.cfg.get("min_peak", 0.008):
             # Quasi-silence : le beam + vocab boosté peut halluciner sur le bruit.
             self.busy = False
@@ -389,13 +672,16 @@ class Engine:
             if time.monotonic() - self.record_started_at >= limit:
                 log("[debug] toggle : limite de durée atteinte, arrêt auto")
                 self.beep(500, 120)
-                self._stop_and_process()
+                self._defer(self._stop_and_process)  # sérialisé avec press/release
                 return
             time.sleep(0.5)
 
     def _apply_corrections(self, text: str) -> str:
         for rx, replacement in self._corrections:
-            text = rx.sub(replacement, text)
+            # sub() par callable : le remplacement est du texte LITTÉRAL, pas
+            # un gabarit regex — un « \ » ou un « \g » saisi par l'utilisateur
+            # ne doit pas faire échouer toutes les transcriptions suivantes.
+            text = rx.sub(lambda m, _v=replacement: _v, text)
         return text
 
     def _transcribe_and_paste(self, samples: np.ndarray, duration: float):
@@ -428,8 +714,28 @@ class Engine:
 
     # --- Hooks clavier -------------------------------------------------------
 
+    # Exécutés sur le worker (jamais dans le hook clavier). Ils relisent l'état
+    # au moment où ils tournent : les appels différés sont donc idempotents.
+    def _on_press(self, mode: str):
+        if mode == "ptt":
+            if not self.recording:
+                self._start("ptt")
+        elif self.recording and self.record_mode == "toggle":
+            self._stop_and_process()  # 2e appui = fin du mains-libres
+        elif not self.recording:
+            self._start("toggle")  # 1er appui = début du mains-libres
+
+    def _on_ptt_release(self):
+        if self.recording and self.record_mode == "ptt":
+            self._stop_and_process()  # PTT : le relâchement arrête
+
     def _make_hook(self, trigger: str, entries: list[tuple[list[str], str]]):
-        """Hook bloquant du `trigger`, partagé par tous ses combos (voir README)."""
+        """Hook bloquant du `trigger`, partagé par tous ses combos (voir README).
+
+        Tourne DANS la procédure WH_KEYBOARD_LL : il décide (suppression,
+        quelle action) et délègue l'exécution au worker via _defer. Tout
+        travail lent ici gèlerait le clavier système entier, et au-delà de
+        ~200 ms Windows retirerait le hook sans un mot."""
 
         def hook(event):
             if event.event_type == "down":
@@ -442,24 +748,31 @@ class Engine:
                     None,
                 )
                 if self._held.get(trigger):
+                    # Auto-repeat. Rattrapage : si les modificateurs sont là et
+                    # que ce maintien n'a encore rien déclenché (Espace arrivé
+                    # quelques ms avant Ctrl, ou appui pendant une transcription
+                    # encore en cours), on démarre maintenant — sans ça, la
+                    # dictée entière partait dans le vide.
+                    if active and not self.recording and not self.busy \
+                            and not self._acted.get(trigger):
+                        self._acted[trigger] = True
+                        _, mode = active
+                        self._defer(lambda m=mode: self._on_press(m))
+                        return False
                     return False if (active or self.recording) else True
                 self._held[trigger] = True
+                self._acted[trigger] = False
                 if self.busy:
                     return False if active else True
                 if active is None:
                     return True  # trigger sans ses modificateurs = touche normale
+                self._acted[trigger] = True
                 _, mode = active
-                if mode == "ptt":
-                    if not self.recording:
-                        self._start("ptt")
-                elif self.recording and self.record_mode == "toggle":
-                    self._stop_and_process()  # 2e appui = fin du mains-libres
-                elif not self.recording:
-                    self._start("toggle")  # 1er appui = début du mains-libres
+                self._defer(lambda m=mode: self._on_press(m))
                 return False
             self._held[trigger] = False
             if self.recording and self.record_mode == "ptt":
-                self._stop_and_process()  # PTT : le relâchement arrête
+                self._defer(self._on_ptt_release)
                 return False
             return False if self.recording else True  # toggle : ne stoppe pas
 
@@ -468,27 +781,29 @@ class Engine:
     def _single_press(self, mode: str, trigger: str):
         """Touche seule (ex. right ctrl), non suppressive : garde anti auto-repeat."""
         if self._held.get(trigger):
+            # Même rattrapage que le hook : appui arrivé pendant une
+            # transcription → démarre dès que busy retombe, sur l'auto-repeat.
+            if not self.recording and not self.busy and not self._acted.get(trigger):
+                self._acted[trigger] = True
+                self._defer(lambda: self._on_press(mode))
             return
         self._held[trigger] = True
         if self.busy:
+            self._acted[trigger] = False
             return
-        if mode == "ptt":
-            if not self.recording:
-                self._start("ptt")
-        elif self.recording and self.record_mode == "toggle":
-            self._stop_and_process()
-        elif not self.recording:
-            self._start("toggle")
+        self._acted[trigger] = True
+        self._defer(lambda: self._on_press(mode))
 
     def _single_release(self, mode: str, trigger: str):
         self._held[trigger] = False
         if mode == "ptt" and self.recording and self.record_mode == "ptt":
-            self._stop_and_process()
+            self._defer(self._on_ptt_release)
 
     def bind_hotkeys(self):
         """(Re)installe les hooks depuis la config. Repartir d'une table propre."""
         keyboard.unhook_all()
         self._held.clear()
+        self._acted.clear()
         ptt = self.cfg.get("hotkey", "ctrl+space")
         toggle = self.cfg.get("toggle_hotkey") or None
 
@@ -520,6 +835,17 @@ class Engine:
 
     def apply_settings(self, s: dict):
         cfg = self.cfg
+        lang = cfg.get("lang", "en")
+        # Valider les raccourcis AVANT toute écriture : un combo invalide
+        # persisté puis bindé briquerait la session (unhook_all déjà fait) ET
+        # le lancement suivant (bind lève au boot, Apply reste grisé — plus
+        # aucun moyen de corriger depuis l'UI).
+        for combo in (s.get("hotkey") or "", s.get("toggle_hotkey") or ""):
+            if combo:
+                bad = validate_hotkey(combo)
+                if bad is not None:
+                    self.on_event("notice", tr(lang, "bad_hotkey").format(bad))
+                    return
         rebind = (
             s["hotkey"] != cfg.get("hotkey")
             or (s.get("toggle_hotkey") or None) != (cfg.get("toggle_hotkey") or None)
@@ -534,6 +860,16 @@ class Engine:
         cfg["hotkey"] = s["hotkey"]
         cfg["toggle_hotkey"] = s.get("toggle_hotkey") or None
         cfg["device"] = s.get("device")
+        # L'identité STABLE d'un micro est son nom — les indices PortAudio se
+        # décalent au moindre branchement. resolve_device s'en sert au boot.
+        cfg["device_name"] = None
+        if isinstance(cfg["device"], int):
+            try:
+                d = sd.query_devices(cfg["device"])
+                if d.get("max_input_channels", 0) > 0:
+                    cfg["device_name"] = d["name"]
+            except Exception:
+                pass
         cfg["sounds"] = bool(s["sounds"])
         cfg["restore_clipboard"] = bool(s["restore_clipboard"])
         cfg["min_peak"] = float(s["min_peak"])
@@ -544,16 +880,26 @@ class Engine:
         save_config(cfg)
 
         if rebind:
-            self.bind_hotkeys()
-        if device_changed and not self.recording:
             try:
-                self.recorder.set_device(cfg["device"])
+                self.bind_hotkeys()
             except Exception as e:
-                self.on_event("notice", tr(self.cfg.get("lang", "en"), "mic_unavailable").format(e))
+                self.on_event("notice", tr(lang, "bad_hotkey").format(e))
+        if device_changed and not self.recording:
+            if self.recorder is None:
+                self._reopen_recorder()
+            else:
+                try:
+                    self.recorder.set_device(resolve_device(cfg))
+                    if self.recorder.fallback:
+                        self.on_event(
+                            "notice", tr(lang, "mic_fallback").format(self.recorder.fallback)
+                        )
+                except Exception as e:
+                    self.on_event("notice", tr(lang, "mic_unavailable").format(e))
         if reload_needed:
             self.reload_async()
         else:
-            self.on_event("notice", tr(self.cfg.get("lang", "en"), "settings_applied"))
+            self.on_event("notice", tr(lang, "settings_applied"))
 
     def save_vocab_text(self, text: str):
         with open(vocab_path(self.cfg), "w", encoding="utf-8") as f:
@@ -587,12 +933,16 @@ def ensure_single_instance():
     import ctypes
 
     ERROR_ALREADY_EXISTS = 183
-    _SINGLE_INSTANCE_MUTEX = ctypes.windll.kernel32.CreateMutexW(
-        None, False, "PersonalWhisper_SingleInstance_Mutex"
-    )
-    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        log("PersonalWhisper tourne déjà — cette instance se ferme.")
+    # use_last_error : lire GetLastError via ctypes.windll peut renvoyer le
+    # last-error de la machinerie ctypes elle-même (GetProcAddress entre les
+    # deux appels), et rater ERROR_ALREADY_EXISTS = deux hooks clavier.
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    handle = k32.CreateMutexW(None, False, "Tsera_SingleInstance_Mutex")
+    if handle and ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        log("Tsera tourne déjà — cette instance se ferme.")
         sys.exit(0)
+    _SINGLE_INSTANCE_MUTEX = handle  # gardé en vie tant que le process tourne
 
 
 def main():
@@ -608,7 +958,7 @@ def main():
     engine = Engine(cfg, overlay, on_event=api._emit)
 
     window = webview.create_window(
-        "PersonalWhisper",
+        "Tsera",
         url=os.path.join(APP_DIR, "web", "index.html"),
         js_api=api,
         width=640,
@@ -628,30 +978,52 @@ def main():
     # Tray : menu Ouvrir / Quitter (double-clic = Ouvrir). run_detached car la
     # boucle principale appartient à webview. Le menu se reconstruit quand la
     # langue change dans les réglages, d'où la fabrique gardée sur l'engine.
+    def _show_window(*_a):
+        window.show()
+        api._emit("shown", None)  # le front rafraîchit la liste des micros
+
     def _tray_menu(lang: str):
         return pystray.Menu(
-            pystray.MenuItem(tr(lang, "open"), lambda i, it: window.show(), default=True),
+            pystray.MenuItem(tr(lang, "open"), _show_window, default=True),
             pystray.MenuItem(tr(lang, "quit"), lambda i, it: api.quit_app()),
         )
 
     engine.build_tray_menu = _tray_menu
     icon = pystray.Icon(
-        "PersonalWhisper", make_icon(False), "PersonalWhisper",
+        "Tsera", make_icon(False), "Tsera",
         _tray_menu(cfg.get("lang", "en")),
     )
     engine.icon = icon
     icon.run_detached()
 
     def _boot():
+        # Chaque étape échoue séparément : un modèle absent n'empêche pas de
+        # binder les raccourcis, un raccourci cassé (config éditée à la main)
+        # n'empêche pas d'atteindre « ready » — sinon Apply reste grisé et
+        # l'utilisateur ne peut plus JAMAIS corriger depuis l'UI.
+        model_ok = False
         try:
             engine.load_model()
+            model_ok = True
+        except FileNotFoundError:
+            log(f"Modèle absent : {engine.model_dir()}")
+            api._emit("status", "error")  # état persistant, pas un toast de 2 s
+            api._emit(
+                "notice", tr(cfg.get("lang", "en"), "model_missing").format(engine.model_dir())
+            )
+        except Exception as e:
+            log(f"Erreur au démarrage : {e}")
+            api._emit("status", "error")
+            api._emit("notice", tr(cfg.get("lang", "en"), "startup_error").format(e))
+        try:
             engine.bind_hotkeys()
+        except Exception as e:
+            log(f"Raccourcis : {e}")
+            api._emit("notice", tr(cfg.get("lang", "en"), "bad_hotkey").format(e))
+        if model_ok:
             engine.beep(660, 60)
             api._emit("status", "ready")
             api._emit("model_ready", None)
-        except Exception as e:
-            log(f"Erreur au démarrage : {e}")
-            api._emit("notice", tr(cfg.get("lang", "en"), "startup_error").format(e))
 
     threading.Thread(target=_boot, daemon=True).start()
 

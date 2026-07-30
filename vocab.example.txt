@@ -1,0 +1,6 @@
+# Vocabulaire custom — un mot ou une expression par ligne.
+# Ces mots sont boostés dans le décodeur (hotwords sherpa-onnx) : noms propres,
+# marques, jargon que le modèle écorche. Lignes vides et « # » ignorées.
+# Copié vers vocab.txt au premier lancement ; vocab.txt reste local (gitignoré).
+Supabase
+LiveKit

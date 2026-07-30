@@ -1,7 +1,8 @@
 <#
-  Installe PersonalWhisper comme app Windows :
-    - raccourci sur le Bureau (lance en tray, sans console)
-    - démarrage automatique au login (dossier shell:startup)
+  Installe Tsera comme app Windows :
+    - raccourci sur le Bureau (ouvre la fenêtre, sans console)
+    - démarrage automatique au login (dossier shell:startup, avec --tray :
+      démarre réduit dans la barre système)
 
   Usage :
     powershell -ExecutionPolicy Bypass -File install.ps1            # Bureau + démarrage auto
@@ -17,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $pythonw = Join-Path $root '.venv\Scripts\pythonw.exe'
 $icon    = Join-Path $root 'icon.ico'
-$name    = 'PersonalWhisper.lnk'
+$name    = 'Tsera.lnk'
 
 $desktop = [Environment]::GetFolderPath('Desktop')
 $startup = [Environment]::GetFolderPath('Startup')
@@ -46,11 +47,11 @@ foreach ($t in $targets) {
     $s.Arguments        = $t.Args
     $s.WorkingDirectory = $root
     $s.WindowStyle      = 7           # aucune fenêtre console : pythonw n'en ouvre pas
-    $s.Description       = 'PersonalWhisper — dictée vocale locale (Ctrl+Espace / Ctrl+Shift+Espace)'
+    $s.Description       = 'Tsera — dictée vocale locale (Ctrl+Espace / Ctrl+Shift+Espace)'
     if (Test-Path $icon) { $s.IconLocation = $icon }
     $s.Save()
     Write-Host "Créé : $($t.Path)  [$($t.Args)]"
 }
 Write-Host ''
-Write-Host 'Fait. Double-clic sur le raccourci du Bureau pour lancer (icône NK dans la barre système).'
+Write-Host 'Fait. Double-clic sur le raccourci du Bureau pour lancer (icône TS dans la barre système).'
 if (-not $NoStartup) { Write-Host 'Se lancera aussi automatiquement à chaque démarrage de Windows.' }
