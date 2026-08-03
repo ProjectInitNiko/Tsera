@@ -345,6 +345,12 @@ function enhanceSelect(sel) {
 
   btn.addEventListener("keydown", (e) => {
     const k = e.key;
+    // Ctrl+Espace est le raccourci de DICTÉE. Sans cette sortie, lancer la
+    // dictée alors qu'un bouton de liste a le focus validait l'option sous le
+    // curseur — c'est ainsi que la langue de dictée est passée en géorgien et
+    // le micro a changé, à l'insu de l'utilisateur. Aucune combinaison avec un
+    // modificateur n'appartient à la liste : on la laisse passer.
+    if (e.ctrlKey || e.altKey || e.metaKey) { if (panel) close(false); return; }
     if (k === "Escape") { if (panel) { e.preventDefault(); close(true); } return; }
     if (k === "ArrowDown" || k === "ArrowUp") {
       e.preventDefault();
