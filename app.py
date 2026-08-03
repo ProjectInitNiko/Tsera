@@ -198,19 +198,40 @@ class Recorder:
         self._lock = threading.Lock()
         self._on_level = on_level  # rms du chunk courant, pour le HUD
         self._stream = None
+        # Fréquence réellement obtenue à l'ouverture : elle peut différer de
+        # celle attendue par le modèle, auquel cas `stop` rééchantillonne.
+        self.capture_rate = sample_rate
         # Volontairement AUCUNE ouverture ici : construire un Recorder ne doit
         # rien prendre au système. Le micro n'est saisi qu'au premier `start`.
 
     def _try_open(self, device):
-        stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            device=device,
-            callback=self._callback,
-        )
-        stream.start()
-        self._stream = stream
+        """Ouvre au taux voulu si le périphérique l'accepte, sinon à son taux
+        natif — WASAPI en mode partagé n'accepte que celui-là. Le taux
+        réellement obtenu est retenu : `stop` rééchantillonne si besoin."""
+        try:
+            info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+        except Exception:
+            info = {}
+        reglages = _wasapi_settings(device)
+        last: Exception | None = None
+        for sr in _open_rates(info, self.sample_rate):
+            try:
+                stream = sd.InputStream(
+                    samplerate=sr,
+                    channels=1,
+                    dtype="float32",
+                    device=device,
+                    callback=self._callback,
+                    extra_settings=reglages,
+                )
+                stream.start()
+            except Exception as e:
+                last = e
+                continue
+            self._stream = stream
+            self.capture_rate = sr
+            return
+        raise last if last is not None else RuntimeError("no usable sample rate")
 
     def _open(self):
         """Ouvre le micro choisi, sinon replis en trois temps : ses autres
@@ -310,8 +331,12 @@ class Recorder:
         with self._lock:
             data = (np.concatenate(self._chunks) if self._chunks
                     else np.zeros(0, dtype=np.float32))
+        capte = self.capture_rate
         self.close()
-        return data
+        # Ramené au taux du modèle. Sans conversion, une capture à 48 kHz lue
+        # comme du 16 kHz durerait trois fois trop longtemps et sonnerait trois
+        # fois trop grave : le modèle n'y reconnaîtrait rien.
+        return _resample(data, capte, self.sample_rate)
 
 
 _RESTORE_TOKEN = None  # dernier paste_text en date : seul son restore est valable
@@ -421,12 +446,22 @@ def compile_corrections(corrections: dict):
 # 6 d'entre elles ne pouvaient PAS s'ouvrir à 16 kHz. On regroupe donc par
 # micro physique et on n'affiche qu'une entrée par micro.
 
-# Ordre de préférence des hôtes audio. WDM-KS est absent volontairement :
-# il demande un accès exclusif (il échoue dès qu'une autre app tient le
-# micro — le cas normal pour une app de dictée), il nomme le même matériel
-# autrement que les autres hôtes ('Microphone (HD Audio Microphone 2)'), et
-# check_input_settings le déclare ouvrable alors que l'ouverture échoue.
-_HOST_PREFERENCE = ("Windows WASAPI", "MME", "Windows DirectSound")
+# Ordre de préférence des hôtes audio.
+#
+# WASAPI d'abord, et c'est un choix mesuré, pas esthétique. Sur un casque USB
+# qui n'expose qu'une interface, **ouvrir le micro par MME rend sa sortie
+# indisponible** : Windows rabat le son sur les haut-parleurs et les lecteurs
+# vidéo qui tenaient ce point de sortie s'arrêtent sans repartir. WASAPI en
+# mode partagé n'a pas ce défaut — c'est la voie qu'empruntent Google Meet et
+# les navigateurs, d'où le duplex qui « marche très bien » chez eux. Son seul
+# prix est d'imposer la fréquence native du périphérique ; on capte donc au
+# taux natif et on rééchantillonne (voir `_resample`).
+#
+# WDM-KS reste exclu : accès exclusif, donc il vole le micro aux autres
+# applications et échoue lui-même dès qu'une autre le tient — testé, il passe
+# et casse d'une minute à l'autre selon ce que fait le navigateur. Il nomme en
+# plus le même matériel autrement que les autres hôtes.
+_HOST_PREFERENCE = ("Windows WASAPI", "Windows DirectSound", "MME")
 
 # Alias du défaut système exposés comme du matériel. La ligne « défaut
 # système » du sélecteur les couvre déjà. Ces noms sont codés en dur dans
@@ -438,6 +473,62 @@ _PSEUDO_DEVICES = ("microsoft sound mapper - input", "primary sound capture driv
 # 'Microphone (2- High Definition ' est le même matériel que
 # 'Microphone (2- High Definition Audio Device)'.
 _MME_NAME_MAX = 31
+
+
+def _lowpass(x: np.ndarray, cutoff: float, taps: int = 101) -> np.ndarray:
+    """Passe-bas FIR (sinc fenêtré Hamming). `cutoff` en fraction de la
+    fréquence d'échantillonnage, entre 0 et 0,5."""
+    n = np.arange(taps) - (taps - 1) / 2.0
+    h = 2 * cutoff * np.sinc(2 * cutoff * n) * np.hamming(taps)
+    h /= h.sum()
+    return np.convolve(x, h, mode="same")
+
+
+def _resample(x: np.ndarray, src: int, dst: int) -> np.ndarray:
+    """Mono float32 de `src` vers `dst` Hz.
+
+    Écrit à la main plutôt qu'avec scipy : la seule fonction utile pèserait
+    plus lourd que tout le reste des dépendances réunies, pour une app qu'on
+    veut pouvoir empaqueter. Précision suffisante pour de la parole.
+
+    Le passe-bas n'est pas optionnel en descente : sans lui, tout ce qui
+    dépasse la nouvelle fréquence de Nyquist se replie dans la bande utile et
+    le modèle entend un sifflement superposé à la voix."""
+    if x.size == 0 or src == dst:
+        return x.astype(np.float32, copy=False)
+    if dst < src:
+        x = _lowpass(x, cutoff=0.45 * dst / src)
+    n = int(round(x.size * dst / float(src)))
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
+    pos = np.linspace(0.0, x.size - 1.0, n)
+    return np.interp(pos, np.arange(x.size), x).astype(np.float32)
+
+
+def _wasapi_settings(device):
+    """`auto_convert` autorise WASAPI à convertir la fréquence à l'intérieur du
+    moteur audio de Windows. Sans lui, le mode partagé n'accepte QUE le taux
+    natif du périphérique et refuse nos 16 kHz — et c'était l'unique raison
+    pour laquelle WASAPI avait été écarté, ce qui renvoyait la capture vers
+    MME, l'hôte qui coupe la sortie des casques USB. C'est aussi ce que fait un
+    navigateur : de là vient le duplex qui « marche très bien » sur Meet.
+
+    `None` pour les autres hôtes, qui n'ont pas ce réglage."""
+    try:
+        info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+        if sd.query_hostapis(info["hostapi"])["name"] != "Windows WASAPI":
+            return None
+        return sd.WasapiSettings(auto_convert=True)
+    except Exception:
+        return None
+
+
+def _open_rates(dev: dict, wanted: int) -> list[int]:
+    """Fréquences à essayer pour ce périphérique, dans l'ordre. Le taux voulu
+    d'abord — s'il passe, aucun rééchantillonnage n'est nécessaire — puis le
+    taux natif, seul accepté par WASAPI en mode partagé."""
+    natif = int(dev.get("default_samplerate") or 0)
+    return [wanted] + ([natif] if natif and natif != wanted else [])
 
 
 def _same_mic(a: str, b: str) -> bool:
@@ -485,12 +576,21 @@ def input_devices(sample_rate: int) -> list[dict]:
             continue
         if host not in _HOST_PREFERENCE:
             continue  # hôte écarté (WDM-KS)
-        try:
-            sd.check_input_settings(
-                device=i, samplerate=sample_rate, channels=1, dtype="float32"
-            )
-        except Exception:
-            continue  # ce format est refusé par cet hôte : entrée morte
+        # Le taux voulu OU le taux natif suffit : ce qui n'entre pas en 16 kHz
+        # est capté au taux du périphérique puis rééchantillonné. C'est ce qui
+        # rend WASAPI utilisable, et donc le duplex possible sur un casque USB.
+        reglages = _wasapi_settings(i)
+        for sr in _open_rates(dev, sample_rate):
+            try:
+                sd.check_input_settings(
+                    device=i, samplerate=sr, channels=1, dtype="float32",
+                    extra_settings=reglages,
+                )
+                break
+            except Exception:
+                continue
+        else:
+            continue  # aucune fréquence acceptée : entrée morte
 
         rank = _HOST_PREFERENCE.index(host)
         for g in groups:
