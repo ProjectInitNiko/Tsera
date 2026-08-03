@@ -170,7 +170,19 @@ def load_vocab(cfg: dict) -> list[str]:
 
 
 class Recorder:
-    """Flux micro ouvert en continu ; on ne garde les frames que pendant la dictée."""
+    """Micro ouvert PENDANT la dictée seulement, puis rendu au système.
+
+    Le flux était auparavant ouvert en continu, pour épargner le délai
+    d'ouverture au moment d'appuyer. C'était intenable avec un casque USB :
+    beaucoup n'exposent qu'une seule interface audio et **ne peuvent pas
+    capter et restituer en même temps**. Mesuré sur le casque de référence —
+    tant que son micro est tenu ouvert, sa sortie répond « Device
+    unavailable » ; Windows bascule le son sur les haut-parleurs et les
+    lecteurs vidéo qui tenaient ce point de sortie s'arrêtent sans repartir.
+    Tsera tournant en permanence, la panne durait aussi longtemps que l'app.
+
+    Ouvrir à la demande coûte 13 à 95 ms selon le périphérique, largement
+    sous le temps qu'on met à commencer à parler après avoir appuyé."""
 
     def __init__(self, sample_rate: int, device=None, on_level=None, candidates=None):
         self.sample_rate = sample_rate
@@ -186,7 +198,8 @@ class Recorder:
         self._lock = threading.Lock()
         self._on_level = on_level  # rms du chunk courant, pour le HUD
         self._stream = None
-        self._open()
+        # Volontairement AUCUNE ouverture ici : construire un Recorder ne doit
+        # rien prendre au système. Le micro n'est saisi qu'au premier `start`.
 
     def _try_open(self, device):
         stream = sd.InputStream(
@@ -242,14 +255,11 @@ class Recorder:
         self._stream = None
         raise last_error if last_error is not None else RuntimeError("no input device")
 
-    def alive(self) -> bool:
-        """Vrai si le flux semble vivant. Certains hôtes audio laissent active
-        à True après un débranchement : le vrai détecteur reste « zéro
-        échantillon capté » dans _stop_and_process."""
-        try:
-            return self._stream is not None and bool(self._stream.active)
-        except Exception:
-            return False
+    # Pas de `alive()` : hors dictée le flux est fermé par construction, donc
+    # un tel indicateur serait faux en fonctionnement normal. Le seul détecteur
+    # fiable d'un micro mort reste « zéro échantillon capté », dans
+    # _stop_and_process — certains hôtes laissent `active` à True après un
+    # débranchement.
 
     def close(self):
         self._active = False
@@ -262,11 +272,13 @@ class Recorder:
         self._stream = None
 
     def set_device(self, device, candidates=None):
-        """Rouvre le flux sur un autre micro (à faire à l'arrêt, pas en dictée)."""
+        """Change de micro. Rien n'est ouvert : la prochaine dictée s'en
+        chargera. Changer de micro dans les réglages ne doit pas saisir le
+        périphérique, sans quoi choisir un casque USB couperait sa sortie."""
         self.close()
         self.device = device
         self.candidates = list(candidates) if candidates else []
-        self._open()
+        self.fallback = None
 
     def _callback(self, indata, frames, time_info, status):
         # Une exception qui s'échappe d'un callback PortAudio tue le flux
@@ -282,16 +294,24 @@ class Recorder:
             pass
 
     def start(self):
+        """Saisit le micro puis démarre la capture. Lève si rien ne s'ouvre —
+        c'est à l'appelant de prévenir et d'abandonner la dictée."""
         with self._lock:
             self._chunks = []
+        if self._stream is None:
+            self._open()
         self._active = True
 
     def stop(self) -> np.ndarray:
+        """Arrête la capture ET rend le périphérique au système. Le casque USB
+        doit récupérer sa sortie dès la fin de la dictée, pas à la fermeture
+        de l'app."""
         self._active = False
         with self._lock:
-            if not self._chunks:
-                return np.zeros(0, dtype=np.float32)
-            return np.concatenate(self._chunks)
+            data = (np.concatenate(self._chunks) if self._chunks
+                    else np.zeros(0, dtype=np.float32))
+        self.close()
+        return data
 
 
 _RESTORE_TOKEN = None  # dernier paste_text en date : seul son restore est valable
@@ -577,25 +597,42 @@ class Engine:
     def _defer(self, fn):
         self._work_q.put(fn)
 
-    def _make_recorder(self) -> Recorder | None:
-        """Ouvre le micro résolu (avec replis) ; None si rien ne s'ouvre.
-        L'app vit quand même — la dictée retentera au prochain appui."""
+    def _make_recorder(self) -> Recorder:
+        """Prépare le micro SANS le saisir : le périphérique n'est ouvert qu'au
+        moment de dicter. Ne peut donc plus échouer ici — les problèmes
+        d'ouverture se signalent au premier appui, dans `_begin_capture`."""
         device, candidates = resolve_device(self.cfg)
-        try:
-            rec = Recorder(
-                self.cfg["sample_rate"],
-                device=device,
-                on_level=self.overlay.push_level,
-                candidates=candidates,
-            )
-        except Exception as e:
-            self.on_event("notice", tr(self.cfg.get("lang", "en"), "mic_none").format(e))
-            return None
-        if rec.fallback:
-            self.on_event(
-                "notice", tr(self.cfg.get("lang", "en"), "mic_fallback").format(rec.fallback)
-            )
-        return rec
+        return Recorder(
+            self.cfg["sample_rate"],
+            device=device,
+            on_level=self.overlay.push_level,
+            candidates=candidates,
+        )
+
+    def _begin_capture(self) -> bool:
+        """Saisit le micro et lance la capture. False si rien ne s'ouvre.
+        Deux essais : le second repart d'un Recorder neuf, ce qui re-résout le
+        micro configuré — il a pu être rebranché, ou libéré par une autre app,
+        depuis le dernier échec."""
+        lang = self.cfg.get("lang", "en")
+        last: Exception | None = None
+        for essai in (0, 1):
+            if self.recorder is None:
+                self.recorder = self._make_recorder()
+            try:
+                self.recorder.start()
+            except Exception as e:
+                last = e
+                log(f"[mic] ouverture impossible (essai {essai + 1}) : {e}")
+                old, self.recorder = self.recorder, None
+                if old is not None:
+                    old.close()
+                continue
+            if self.recorder.fallback:
+                self.on_event("notice", tr(lang, "mic_fallback").format(self.recorder.fallback))
+            return True
+        self.on_event("notice", tr(lang, "mic_none").format(last))
+        return False
 
     def _reopen_recorder(self):
         old, self.recorder = self.recorder, None
@@ -687,16 +724,13 @@ class Engine:
                 return
             self.recording = True
             self.record_mode = mode
-        if self.recorder is None or not self.recorder.alive():
-            self._reopen_recorder()  # micro branché/libéré depuis le dernier échec
-            if self.recorder is None:
-                with self._state_lock:
-                    self.recording = False
-                    self.record_mode = None
-                self.beep(200, 300)
-                return
+        if not self._begin_capture():
+            with self._state_lock:
+                self.recording = False
+                self.record_mode = None
+            self.beep(200, 300)
+            return
         self.record_started_at = time.monotonic()
-        self.recorder.start()
         self.set_tray(True)
         self.overlay.show_recording()
         self.beep(880, 70)
@@ -978,18 +1012,14 @@ class Engine:
                 self.bind_hotkeys()
             except Exception as e:
                 self.on_event("notice", tr(lang, "bad_hotkey").format(e))
+        # Le nouveau micro est seulement enregistré : rien n'est ouvert tant
+        # qu'on ne dicte pas. Choisir un casque USB dans les réglages ne doit
+        # pas saisir son interface audio — ça lui couperait la sortie.
         if device_changed and not self.recording:
             if self.recorder is None:
-                self._reopen_recorder()
+                self.recorder = self._make_recorder()
             else:
-                try:
-                    self.recorder.set_device(*resolve_device(cfg))
-                    if self.recorder.fallback:
-                        self.on_event(
-                            "notice", tr(lang, "mic_fallback").format(self.recorder.fallback)
-                        )
-                except Exception as e:
-                    self.on_event("notice", tr(lang, "mic_unavailable").format(e))
+                self.recorder.set_device(*resolve_device(cfg))
         if reload_needed:
             self.reload_async()
         else:
