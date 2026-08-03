@@ -36,6 +36,7 @@ class Api:
         self._status = "loading"
         self._history = []
         self._maximized = False
+        self._restore_bounds = None  # taille d'avant l'agrandissement
         self._fullscreen = False
         # evaluate_js bloque sur un aller-retour vers le thread UI WinForms.
         # Appelé depuis le hook clavier (via on_event), il gelait le clavier
@@ -213,6 +214,32 @@ class Api:
             return False
         return True
 
+    @staticmethod
+    def _work_area(w):
+        """Zone de travail de l'écran où se trouve la fenêtre, c'est-à-dire
+        l'écran MOINS la barre des tâches. `None` si on ne sait pas la lire.
+
+        WinForms dimensionne une fenêtre `frameless` passée en `Maximized` sur
+        le moniteur ENTIER, pas sur la zone de travail : la barre des tâches
+        disparaît sous la fenêtre. On agrandit donc à la main. On passe par
+        `Screen` plutôt que par l'API Win32 pour rester dans le référentiel de
+        coordonnées de WinForms, le même que `w.move` et `w.resize`."""
+        try:
+            import clr
+
+            clr.AddReference("System.Windows.Forms")
+            clr.AddReference("System.Drawing")
+            from System.Drawing import Point
+            from System.Windows.Forms import Screen
+
+            # L'écran est choisi par le CENTRE de la fenêtre : sur un poste à
+            # deux écrans, son coin haut-gauche peut appartenir au voisin.
+            centre = Point(int(w.x + w.width / 2), int(w.y + w.height / 2))
+            a = Screen.FromPoint(centre).WorkingArea
+            return int(a.X), int(a.Y), int(a.Width), int(a.Height)
+        except Exception:
+            return None
+
     def toggle_maximize(self):
         """Renvoie l'état atteint pour que le bouton change d'icône."""
         w = self._window
@@ -220,10 +247,26 @@ class Api:
             return False
         try:
             if self._maximized:
-                w.restore()
+                b = self._restore_bounds
+                if b:
+                    w.resize(b["width"], b["height"])
+                    w.move(b["x"], b["y"])
+                else:
+                    w.restore()
+                self._maximized = False
             else:
-                w.maximize()
-            self._maximized = not self._maximized
+                area = self._work_area(w)
+                if area is None:
+                    w.maximize()  # repli : agrandit, mais masque la barre des tâches
+                else:
+                    x, y, cw, ch = area
+                    # Mémorisé AVANT de bouger, sinon on restaure la taille agrandie.
+                    self._restore_bounds = {
+                        "x": w.x, "y": w.y, "width": w.width, "height": w.height
+                    }
+                    w.resize(cw, ch)
+                    w.move(x, y)
+                self._maximized = True
         except Exception:
             return self._maximized
         return self._maximized

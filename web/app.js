@@ -132,9 +132,18 @@ function toast(msg) {
 function initTabs() {
   const tabs = [...document.querySelectorAll(".tab")];
   const ink = $("tabsInk") || document.querySelector(".tabs__ink");
-  function moveInk(tab) {
+  const bar = ink.parentElement;
+  function moveInk(tab, animate = true) {
+    if (!tab) return;
+    // Un repositionnement dû au redimensionnement doit être instantané : animé,
+    // le trait glisserait pendant 280 ms à chaque pixel tiré à la poignée.
+    if (!animate) ink.style.transition = "none";
     ink.style.left = tab.offsetLeft + "px";
     ink.style.width = tab.offsetWidth + "px";
+    if (!animate) {
+      void ink.offsetWidth;  // force le reflow avant de rendre la transition
+      ink.style.transition = "";
+    }
   }
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -146,6 +155,15 @@ function initTabs() {
     });
   });
   moveInk(document.querySelector(".tab.is-active"));
+
+  // Les onglets sont en `flex:1` — leur largeur suit celle de la fenêtre —
+  // alors que le trait est posé en PIXELS. Sans ce recalcul, agrandir laissait
+  // un trait trop court sous l'onglet, et revenir en fenêtré un trait à cheval
+  // sur deux onglets. On observe la barre plutôt que window.resize : elle
+  // bouge aussi quand une barre de défilement apparaît.
+  const reflow = () => moveInk(document.querySelector(".tab.is-active"), false);
+  if (window.ResizeObserver) new ResizeObserver(reflow).observe(bar);
+  else window.addEventListener("resize", reflow);
 }
 
 /* ---------- Forme d'onde (canvas) ---------- */
