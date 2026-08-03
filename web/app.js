@@ -225,7 +225,7 @@ function fillState(s) {
   sel.innerHTML = "";
   const def = new Option(tr("mic_default", "System default"), "");
   sel.add(def);
-  (s.devices || []).forEach((d) => sel.add(new Option(`${d.index} · ${d.name}`, String(d.index))));
+  (s.devices || []).forEach((d) => sel.add(new Option(d.name, String(d.index))));
   sel.value = s.device == null ? "" : String(s.device);
   if (sel.selectedIndex < 0) sel.value = "";  // index configuré disparu → défaut
 
@@ -267,11 +267,15 @@ async function refreshDevices() {
   try {
     const devices = await api().list_devices();
     const sel = $("device");
-    const cur = sel.value;
+    // On retient le NOM et pas l'index : débrancher un micro décale les index
+    // PortAudio, et restaurer l'ancien sélectionnerait un autre micro.
+    const curName = sel.selectedIndex > 0 ? sel.options[sel.selectedIndex].text : "";
     while (sel.options.length > 1) sel.remove(1);
-    (devices || []).forEach((d) => sel.add(new Option(`${d.index} · ${d.name}`, String(d.index))));
-    sel.value = cur;
-    if (sel.selectedIndex < 0) sel.value = "";
+    (devices || []).forEach((d) => sel.add(new Option(d.name, String(d.index))));
+    sel.value = "";
+    for (let i = 1; i < sel.options.length; i++) {
+      if (sel.options[i].text === curName) { sel.selectedIndex = i; break; }
+    }
   } catch (_) { /* bridge indisponible : la liste actuelle reste affichée */ }
 }
 

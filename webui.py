@@ -101,13 +101,16 @@ class Api:
             "status": self._status,
             "hotkey": cfg.get("hotkey", "ctrl+space"),
             "toggle_hotkey": cfg.get("toggle_hotkey") or "",
-            "devices": [{"index": i, "name": n} for i, n in _app.list_input_devices()],
+            "devices": self.list_devices(),
             "lang": cfg.get("lang", "en"),
             "dictation_lang": cfg.get("dictation_lang", "multi"),
             "has_georgian": os.path.isdir(
                 os.path.join(_app.APP_DIR, cfg.get("model_dir_ka", _app.MODEL_DIR_KA))
             ),
-            "device": cfg.get("device"),
+            # Index du micro configuré tel qu'il existe MAINTENANT : celui du
+            # fichier de config peut avoir été décalé par un branchement, et
+            # sélectionnerait alors la mauvaise ligne (ou aucune).
+            "device": _app.resolve_device(cfg)[0],
             "sounds": cfg.get("sounds", True),
             "overlay": cfg.get("overlay", True),
             "restore_clipboard": cfg.get("restore_clipboard", True),
@@ -128,8 +131,10 @@ class Api:
 
     def list_devices(self):
         """Ré-énumère les micros — la liste de ready() devient obsolète dès
-        qu'un périphérique est branché ou débranché."""
-        return [{"index": i, "name": n} for i, n in _app.list_input_devices()]
+        qu'un périphérique est branché ou débranché. Une entrée par micro
+        physique : les alias par hôte audio sont regroupés côté app.py."""
+        sr = self._cfg.get("sample_rate", 16000)
+        return [{"index": m["index"], "name": m["name"]} for m in _app.input_devices(sr)]
 
     def save_vocab(self, text: str):
         if self._engine:

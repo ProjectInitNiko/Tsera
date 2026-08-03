@@ -172,9 +172,14 @@ def load_vocab(cfg: dict) -> list[str]:
 class Recorder:
     """Flux micro ouvert en continu ; on ne garde les frames que pendant la dictée."""
 
-    def __init__(self, sample_rate: int, device=None, on_level=None):
+    def __init__(self, sample_rate: int, device=None, on_level=None, candidates=None):
         self.sample_rate = sample_rate
         self.device = device
+        # Index PortAudio du MÊME micro physique vus par des hôtes audio
+        # différents, par ordre de préférence. Les épuiser avant de changer de
+        # micro : si WASAPI refuse le 16 kHz, on rebascule sur le même casque
+        # en MME au lieu de sauter silencieusement sur un autre micro.
+        self.candidates: list = list(candidates) if candidates else []
         self.fallback: str | None = None  # nom du micro de repli, le cas échéant
         self._chunks: list[np.ndarray] = []
         self._active = False
@@ -195,39 +200,45 @@ class Recorder:
         self._stream = stream
 
     def _open(self):
-        """Ouvre `self.device`, sinon replis : défaut système, puis premier
+        """Ouvre le micro choisi, sinon replis en trois temps : ses autres
+        hôtes audio (même matériel), le défaut système, puis n'importe quel
         micro qui s'ouvre RÉELLEMENT. check_input_settings ne suffit pas — il
         valide un format sans ouvrir, et un périphérique tenu par une autre
-        app (Discord…) passe le check puis échoue à l'ouverture. Un repli est
-        mémorisé dans `self.fallback` pour que l'Engine prévienne."""
+        app (Discord…) passe le check puis échoue à l'ouverture. Seul le
+        premier temps garde le micro voulu : les deux autres changent de
+        matériel et sont donc signalés dans `self.fallback`."""
         self.fallback = None
         last_error: Exception | None = None
-        candidates: list = [self.device]
-        if self.device is not None:
-            candidates.append(None)  # défaut système
-        for cand in candidates:
+        # 1) le micro choisi, par chacun de ses hôtes audio
+        for cand in self.candidates or [self.device]:
             try:
                 self._try_open(cand)
-                if cand != self.device:
-                    try:
-                        self.fallback = sd.query_devices(kind="input")["name"]
-                    except Exception:
-                        self.fallback = "system default"
+                return  # même micro physique : rien à signaler
+            except Exception as e:
+                last_error = e
+        # 2) défaut système
+        if self.device is not None:
+            try:
+                self._try_open(None)
+                try:
+                    self.fallback = sd.query_devices(kind="input")["name"]
+                except Exception:
+                    self.fallback = "system default"
                 return
             except Exception as e:
                 last_error = e
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            devices = []
-        for i, dev in enumerate(devices):
-            if dev.get("max_input_channels", 0) > 0 and i != self.device:
-                try:
-                    self._try_open(i)
-                    self.fallback = dev["name"]
-                    return
-                except Exception as e:
-                    last_error = e
+        # 3) n'importe quel autre micro
+        tried = set(self.candidates) | {self.device}
+        for dev in input_devices(self.sample_rate):
+            idx = dev["index"]
+            if idx in tried:
+                continue
+            try:
+                self._try_open(idx)
+                self.fallback = dev["name"]
+                return
+            except Exception as e:
+                last_error = e
         self._stream = None
         raise last_error if last_error is not None else RuntimeError("no input device")
 
@@ -250,10 +261,11 @@ class Recorder:
             pass
         self._stream = None
 
-    def set_device(self, device):
+    def set_device(self, device, candidates=None):
         """Rouvre le flux sur un autre micro (à faire à l'arrêt, pas en dictée)."""
         self.close()
         self.device = device
+        self.candidates = list(candidates) if candidates else []
         self._open()
 
     def _callback(self, indata, frames, time_info, status):
@@ -382,47 +394,123 @@ def compile_corrections(corrections: dict):
     ]
 
 
-def list_input_devices() -> list[tuple[int, str]]:
-    """(index, libellé) des entrées disponibles. Windows expose chaque micro
-    3-4 fois (MME, DirectSound, WASAPI, WDM-KS) : le nom de l'hôte audio est
-    ajouté au libellé pour que les doublons soient distinguables."""
-    out = []
+# --- Micros ----------------------------------------------------------------
+#
+# Windows expose le MÊME micro par plusieurs hôtes audio : sur la machine de
+# référence, 3 micros physiques produisaient 15 entrées dans le sélecteur, et
+# 6 d'entre elles ne pouvaient PAS s'ouvrir à 16 kHz. On regroupe donc par
+# micro physique et on n'affiche qu'une entrée par micro.
+
+# Ordre de préférence des hôtes audio. WDM-KS est absent volontairement :
+# il demande un accès exclusif (il échoue dès qu'une autre app tient le
+# micro — le cas normal pour une app de dictée), il nomme le même matériel
+# autrement que les autres hôtes ('Microphone (HD Audio Microphone 2)'), et
+# check_input_settings le déclare ouvrable alors que l'ouverture échoue.
+_HOST_PREFERENCE = ("Windows WASAPI", "MME", "Windows DirectSound")
+
+# Alias du défaut système exposés comme du matériel. La ligne « défaut
+# système » du sélecteur les couvre déjà. Ces noms sont codés en dur dans
+# PortAudio, donc identiques quelle que soit la langue de Windows.
+_PSEUDO_DEVICES = ("microsoft sound mapper - input", "primary sound capture driver")
+
+
+# MME coupe les noms à 31 caractères (MAXPNAMELEN, terminateur compris) :
+# 'Microphone (2- High Definition ' est le même matériel que
+# 'Microphone (2- High Definition Audio Device)'.
+_MME_NAME_MAX = 31
+
+
+def _same_mic(a: str, b: str) -> bool:
+    """Deux libellés désignent-ils le même micro physique ?"""
+    na, nb = " ".join(a.split()).casefold(), " ".join(b.split()).casefold()
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    # Sinon, seule une troncature MME peut expliquer l'écart. On exige que le
+    # nom court soit coupé PILE à la limite de l'API : un préfixe accepté sans
+    # cette condition confondrait deux micros bien distincts, du genre
+    # 'Micro (USB Audio)' et 'Micro (USB Audio) 2'.
+    if len(na) > len(nb):
+        na, nb, a = nb, na, b
+    return len(a.rstrip()) >= _MME_NAME_MAX - 1 and nb.startswith(na)
+
+
+def input_devices(sample_rate: int) -> list[dict]:
+    """Un enregistrement par micro PHYSIQUE : `{name, index, candidates}`.
+
+    `candidates` liste tous les index PortAudio du même micro par ordre de
+    préférence d'hôte, ce qui permet à Recorder de replier sans changer de
+    matériel. Le tri par `check_input_settings` attrape le refus du 16 kHz par
+    WASAPI pour 12 ms sur toute la liste, là où ouvrir réellement chaque
+    entrée coûte 470 ms. Ce test ment encore sur la disponibilité de l'instant
+    (un micro tenu par Discord le passe) : c'est l'ouverture qui tranche, d'où
+    les candidats ordonnés plutôt qu'un index unique."""
     try:
         apis = sd.query_hostapis()
-        for i, dev in enumerate(sd.query_devices()):
-            if dev.get("max_input_channels", 0) > 0:
-                label = dev["name"]
-                try:
-                    label = f"{dev['name']} · {apis[dev['hostapi']]['name']}"
-                except Exception:
-                    pass
-                out.append((i, label))
+        devs = sd.query_devices()
     except Exception:
-        pass
+        return []
+
+    groups: list[dict] = []
+    for i, dev in enumerate(devs):
+        if dev.get("max_input_channels", 0) <= 0:
+            continue
+        name = str(dev.get("name", "")).strip()
+        if not name or " ".join(name.split()).casefold() in _PSEUDO_DEVICES:
+            continue
+        try:
+            host = apis[dev["hostapi"]]["name"]
+        except Exception:
+            continue
+        if host not in _HOST_PREFERENCE:
+            continue  # hôte écarté (WDM-KS)
+        try:
+            sd.check_input_settings(
+                device=i, samplerate=sample_rate, channels=1, dtype="float32"
+            )
+        except Exception:
+            continue  # ce format est refusé par cet hôte : entrée morte
+
+        rank = _HOST_PREFERENCE.index(host)
+        for g in groups:
+            if _same_mic(g["name"], name):
+                g["_cands"].append((rank, i))
+                # Le libellé affiché vient du nom le plus complet du groupe :
+                # celui de l'hôte préféré peut être la troncature MME.
+                if len(name) > len(g["name"]):
+                    g["name"] = name
+                break
+        else:
+            groups.append({"name": name, "_cands": [(rank, i)]})
+
+    out = []
+    for g in groups:
+        idxs = [i for _, i in sorted(g["_cands"])]
+        out.append({"name": g["name"], "index": idxs[0], "candidates": idxs})
     return out
 
 
-def resolve_device(cfg: dict):
-    """Index PortAudio du micro configuré. L'identité stable est le NOM :
-    les indices se décalent dès qu'un périphérique apparaît ou disparaît, donc
-    un index brut peut désigner silencieusement un autre micro au lancement
-    suivant. L'index stocké ne sert que de préférence quand le nom colle."""
+def resolve_device(cfg: dict) -> tuple[object, list]:
+    """(index préféré, candidats) du micro configuré, `(None, [])` pour le
+    défaut système. L'identité stable est le NOM : les index PortAudio se
+    décalent dès qu'un périphérique apparaît ou disparaît, donc un index brut
+    peut désigner silencieusement un autre micro au lancement suivant."""
     name = cfg.get("device_name")
     idx = cfg.get("device")
-    if not name:
-        return idx  # config historique (index brut) ou None = défaut système
-    try:
-        devices = sd.query_devices()
-    except Exception:
-        return None
-    if isinstance(idx, int) and 0 <= idx < len(devices):
-        d = devices[idx]
-        if d.get("max_input_channels", 0) > 0 and d.get("name") == name:
-            return idx
-    for i, d in enumerate(devices):
-        if d.get("max_input_channels", 0) > 0 and d.get("name") == name:
-            return i
-    return None  # micro configuré introuvable → défaut système
+    mics = input_devices(cfg.get("sample_rate", 16000))
+
+    if name:
+        for m in mics:
+            if _same_mic(m["name"], name):
+                return m["index"], m["candidates"]
+    # Config historique sans nom : l'index brut sert une dernière fois, le
+    # temps que save_settings réécrive un nom.
+    if not name and isinstance(idx, int):
+        for m in mics:
+            if idx in m["candidates"]:
+                return m["index"], m["candidates"]
+    return None, []  # micro configuré introuvable → défaut système
 
 
 def validate_hotkey(combo: str) -> str | None:
@@ -492,11 +580,13 @@ class Engine:
     def _make_recorder(self) -> Recorder | None:
         """Ouvre le micro résolu (avec replis) ; None si rien ne s'ouvre.
         L'app vit quand même — la dictée retentera au prochain appui."""
+        device, candidates = resolve_device(self.cfg)
         try:
             rec = Recorder(
                 self.cfg["sample_rate"],
-                device=resolve_device(self.cfg),
+                device=device,
                 on_level=self.overlay.push_level,
+                candidates=candidates,
             )
         except Exception as e:
             self.on_event("notice", tr(self.cfg.get("lang", "en"), "mic_none").format(e))
@@ -850,7 +940,17 @@ class Engine:
             s["hotkey"] != cfg.get("hotkey")
             or (s.get("toggle_hotkey") or None) != (cfg.get("toggle_hotkey") or None)
         )
-        device_changed = s.get("device") != cfg.get("device")
+        # Le micro se compare par NOM, pas par index : deux listes successives
+        # peuvent réutiliser le même index pour deux micros différents, et un
+        # changement serait alors passé sous silence.
+        new_index = s.get("device")
+        new_name = None
+        if isinstance(new_index, int):
+            for m in input_devices(cfg.get("sample_rate", 16000)):
+                if new_index in m["candidates"]:
+                    new_name = m["name"]  # nom canonique du groupe, jamais la troncature MME
+                    break
+        device_changed = new_name != cfg.get("device_name")
         # Changer de langue de dictée change de modèle : rechargement obligatoire.
         lang_changed = s.get("dictation_lang", "multi") != cfg.get("dictation_lang", "multi")
         reload_needed = lang_changed or abs(
@@ -859,17 +959,11 @@ class Engine:
 
         cfg["hotkey"] = s["hotkey"]
         cfg["toggle_hotkey"] = s.get("toggle_hotkey") or None
-        cfg["device"] = s.get("device")
-        # L'identité STABLE d'un micro est son nom — les indices PortAudio se
-        # décalent au moindre branchement. resolve_device s'en sert au boot.
-        cfg["device_name"] = None
-        if isinstance(cfg["device"], int):
-            try:
-                d = sd.query_devices(cfg["device"])
-                if d.get("max_input_channels", 0) > 0:
-                    cfg["device_name"] = d["name"]
-            except Exception:
-                pass
+        # L'identité STABLE d'un micro est son nom — les index PortAudio se
+        # décalent au moindre branchement. resolve_device s'en sert au boot ;
+        # l'index n'est gardé que comme préférence.
+        cfg["device"] = new_index if new_name else None
+        cfg["device_name"] = new_name
         cfg["sounds"] = bool(s["sounds"])
         cfg["restore_clipboard"] = bool(s["restore_clipboard"])
         cfg["min_peak"] = float(s["min_peak"])
@@ -889,7 +983,7 @@ class Engine:
                 self._reopen_recorder()
             else:
                 try:
-                    self.recorder.set_device(resolve_device(cfg))
+                    self.recorder.set_device(*resolve_device(cfg))
                     if self.recorder.fallback:
                         self.on_event(
                             "notice", tr(lang, "mic_fallback").format(self.recorder.fallback)
