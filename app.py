@@ -193,6 +193,10 @@ class Recorder:
         # en MME au lieu de sauter silencieusement sur un autre micro.
         self.candidates: list = list(candidates) if candidates else []
         self.fallback: str | None = None  # nom du micro de repli, le cas échéant
+        # Cause probable du repli, à afficher : « indisponible » tout court ne
+        # dit pas à l'utilisateur quoi faire, et c'est en général la sortie du
+        # même casque qui bloque sa propre capture.
+        self.diagnosis: str | None = None
         self._chunks: list[np.ndarray] = []
         self._active = False
         self._lock = threading.Lock()
@@ -242,7 +246,9 @@ class Recorder:
         premier temps garde le micro voulu : les deux autres changent de
         matériel et sont donc signalés dans `self.fallback`."""
         self.fallback = None
+        self.diagnosis = None
         last_error: Exception | None = None
+        voulu = ""
         # 1) le micro choisi, par chacun de ses hôtes audio
         for cand in self.candidates or [self.device]:
             try:
@@ -250,6 +256,16 @@ class Recorder:
                 return  # même micro physique : rien à signaler
             except Exception as e:
                 last_error = e
+        # Aucun hôte n'a voulu du micro choisi. Sur un casque USB, la cause de
+        # loin la plus fréquente n'est pas « micro absent » mais « sa propre
+        # sortie joue » : l'appareil est half-duplex. Le dire, sinon
+        # l'utilisateur cherche un problème de micro qui n'existe pas.
+        try:
+            voulu = str(sd.query_devices(self.device)["name"]) if self.device is not None else ""
+        except Exception:
+            voulu = ""
+        if voulu and _has_output_twin(voulu):
+            self.diagnosis = "half_duplex"
         # 2) défaut système
         if self.device is not None:
             try:
@@ -261,18 +277,23 @@ class Recorder:
                 return
             except Exception as e:
                 last_error = e
-        # 3) n'importe quel autre micro
+        # 3) un autre micro — mais JAMAIS au hasard. Les entrées virtuelles
+        # s'ouvrent sans broncher et ne renvoient que du silence : les prendre
+        # avant un vrai micro transforme un problème visible en dictée qui
+        # échoue sans message. Elles restent en dernier recours.
         tried = set(self.candidates) | {self.device}
-        for dev in input_devices(self.sample_rate):
-            idx = dev["index"]
-            if idx in tried:
-                continue
-            try:
-                self._try_open(idx)
+        autres = [d for d in input_devices(self.sample_rate)
+                  if d["index"] not in tried and not (voulu and _same_mic(d["name"], voulu))]
+        autres.sort(key=lambda d: _is_virtual(d["name"]))
+        for dev in autres:
+            for cand in dev["candidates"]:
+                try:
+                    self._try_open(cand)
+                except Exception as e:
+                    last_error = e
+                    continue
                 self.fallback = dev["name"]
                 return
-            except Exception as e:
-                last_error = e
         self._stream = None
         raise last_error if last_error is not None else RuntimeError("no input device")
 
@@ -392,8 +413,10 @@ STRINGS = {
         "stt_error": "Transcription error: {}",
         "bad_hotkey": "Invalid hotkey \"{}\" — settings not saved",
         "mic_fallback": "Configured microphone unavailable — using: {}",
+        "mic_half_duplex": "\"{}\" can't record while its own speakers are playing — using \"{}\" instead. Pick that microphone in Settings to make it permanent.",
         "mic_none": "No working microphone found ({}). Dictation paused — plug one in and try again.",
         "mic_dead": "No audio captured — the microphone stream was dead. Reopened, try again.",
+        "mic_silent": "\"{}\" captured only silence. Pick a different microphone in Settings.",
         "model_missing": "Model folder missing: {}. See README (Setup) to download it, then restart.",
         "save_error": "Could not save settings: {}",
     },
@@ -410,8 +433,10 @@ STRINGS = {
         "stt_error": "Erreur de transcription : {}",
         "bad_hotkey": "Raccourci invalide « {} » — réglages non enregistrés",
         "mic_fallback": "Micro configuré indisponible — bascule sur : {}",
+        "mic_half_duplex": "« {} » ne peut pas enregistrer pendant que son propre écouteur joue — bascule sur « {} ». Choisis ce micro dans les Réglages pour rendre ça permanent.",
         "mic_none": "Aucun micro fonctionnel ({}). Dictée en pause — branche un micro et réessaie.",
         "mic_dead": "Aucun audio capté — le flux micro était mort. Rouvert, réessaie.",
+        "mic_silent": "« {} » n'a capté que du silence. Choisis un autre micro dans les Réglages.",
         "model_missing": "Dossier du modèle absent : {}. Voir le README (Setup) pour le télécharger, puis relance.",
         "save_error": "Impossible d'enregistrer les réglages : {}",
     },
@@ -473,6 +498,17 @@ _PSEUDO_DEVICES = ("microsoft sound mapper - input", "primary sound capture driv
 # 'Microphone (2- High Definition ' est le même matériel que
 # 'Microphone (2- High Definition Audio Device)'.
 _MME_NAME_MAX = 31
+
+# Micros qui ne captent rien de fiable : pilotes virtuels, passerelles réseau,
+# entrées de cartes graphiques. Ils s'ouvrent parfaitement et renvoient du
+# silence — le pire des replis, parce que la dictée échoue SANS erreur. Testé
+# le 03/08/2026 : 'Microphone (Iriun Webcam)' donnait un pic de 0,00000 là où
+# le micro intégré du portable marchait, et Tsera le choisissait quand même.
+# Ils restent proposés, mais toujours en dernier.
+_VIRTUAL_HINTS = (
+    "iriun", "virtual", "vb-audio", "vb audio", "voicemeeter", "cable",
+    "nvidia", "midi", "obs", "steam", "droidcam", "epoccam",
+)
 
 
 def _lowpass(x: np.ndarray, cutoff: float, taps: int = 101) -> np.ndarray:
@@ -545,6 +581,28 @@ def _same_mic(a: str, b: str) -> bool:
     if len(na) > len(nb):
         na, nb, a = nb, na, b
     return len(a.rstrip()) >= _MME_NAME_MAX - 1 and nb.startswith(na)
+
+
+def _is_virtual(name: str) -> bool:
+    n = " ".join(name.split()).casefold()
+    return any(h in n for h in _VIRTUAL_HINTS)
+
+
+def _has_output_twin(name: str) -> bool:
+    """Ce micro appartient-il à un appareil qui a AUSSI une sortie ? (casque,
+    micro-casque USB…) Sert à expliquer un refus d'ouverture : sur un appareil
+    half-duplex, la sortie en cours d'utilisation rend la capture indisponible.
+    Mesuré le 03/08/2026 sur le casque USB-C Samsung (VID_04E8/PID_A051) —
+    exclusion mutuelle stricte sur les quatre hôtes audio, dans les deux ordres
+    d'ouverture, en flux séparés comme en flux duplex unique, la capture
+    redevenant disponible 19 ms après l'arrêt du rendu."""
+    try:
+        for d in sd.query_devices():
+            if d.get("max_output_channels", 0) > 0 and _same_mic(str(d.get("name", "")), name):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def input_devices(sample_rate: int) -> list[dict]:
@@ -728,8 +786,23 @@ class Engine:
                 if old is not None:
                     old.close()
                 continue
-            if self.recorder.fallback:
-                self.on_event("notice", tr(lang, "mic_fallback").format(self.recorder.fallback))
+            repli = self.recorder.fallback
+            if repli:
+                voulu = self.cfg.get("device_name") or "?"
+                if self.recorder.diagnosis == "half_duplex":
+                    msg = tr(lang, "mic_half_duplex").format(voulu, repli)
+                else:
+                    msg = tr(lang, "mic_fallback").format(repli)
+                self.on_event("notice", msg)
+                # L'interface web est rarement ouverte : sans repère sonore, un
+                # changement de micro passe totalement inaperçu et la dictée
+                # semble « ne plus rien entendre ». Un bip par NOUVEAU repli
+                # seulement, pour ne pas sonner à chaque phrase.
+                if repli != getattr(self, "_repli_signale", None):
+                    self._repli_signale = repli
+                    self.beep(520, 90)
+            else:
+                self._repli_signale = None
             return True
         self.on_event("notice", tr(lang, "mic_none").format(last))
         return False
@@ -869,11 +942,23 @@ class Engine:
             self._reopen_recorder()
             self._set_status("ready")
             return
-        if peak < self.cfg.get("min_peak", 0.008):
+        seuil = self.cfg.get("min_peak", 0.008)
+        if peak < seuil:
             # Quasi-silence : le beam + vocab boosté peut halluciner sur le bruit.
             self.busy = False
             self.overlay.hide()
             self.beep(300, 150)
+            # Un micro qui marche a un bruit de fond ; un pic sous le dixième du
+            # seuil, c'est du silence numérique — micro coupé, ou entrée
+            # virtuelle qui ne capte rien. Le distinguer d'« il n'a pas parlé »
+            # évite de rester muet sur une vraie panne, sans râler à chaque
+            # appui trop court.
+            if peak < seuil / 10:
+                utilise = (self.recorder.fallback if self.recorder is not None else None) \
+                    or self.cfg.get("device_name") or "?"
+                self.on_event(
+                    "notice", tr(self.cfg.get("lang", "en"), "mic_silent").format(utilise)
+                )
             self._set_status("ready")
             return
         max_samples = int(self.cfg["max_duration_s"] * self.cfg["sample_rate"])
