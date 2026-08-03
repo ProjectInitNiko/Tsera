@@ -166,6 +166,239 @@ function initTabs() {
   else window.addEventListener("resize", reflow);
 }
 
+/* ---------- Listes déroulantes ----------
+   Les <select> natifs de Windows peignent un menu système gris qui ignore
+   entièrement la feuille de style : au milieu de la faceplate, ça tranche.
+   On habille donc chaque select d'un bouton et d'un panneau maison.
+
+   Le <select> reste dans le DOM et garde la valeur. C'est ce qui rend le
+   remplacement sans risque : `gatherSettings`, `applyState`, `refreshDevices`
+   et l'i18n continuent de lire et d'écrire le select comme avant, et si ce
+   script échoue la liste native reprend la main. */
+
+let xselSeq = 0;
+
+function enhanceSelect(sel) {
+  const wrap = sel.parentElement;
+  if (!wrap || wrap.classList.contains("is-enhanced")) return;
+  wrap.classList.add("is-enhanced");
+  // Retiré du parcours clavier : c'est le bouton qui porte l'ARIA, sinon le
+  // focus passerait par un select invisible.
+  sel.setAttribute("tabindex", "-1");
+  sel.setAttribute("aria-hidden", "true");
+
+  const id = "xsel" + ++xselSeq;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "xsel";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  const val = document.createElement("span");
+  val.className = "xsel__value";
+  btn.appendChild(val);
+  btn.insertAdjacentHTML("beforeend",
+    '<svg class="xsel__chev" viewBox="0 0 12 8" aria-hidden="true"><path d="M1 1.5 6 6.5 11 1.5"/></svg>');
+  wrap.appendChild(btn);
+
+  let panel = null, cursor = -1, typed = "", typedAt = 0;
+
+  function syncButton() {
+    const o = sel.selectedOptions[0];
+    val.textContent = o ? o.textContent : "—";
+    val.classList.toggle("is-empty", !o);
+    btn.title = o ? o.textContent : "";  // les noms de micro dépassent la largeur
+  }
+
+  function render() {
+    panel.textContent = "";
+    [...sel.options].forEach((o, i) => {
+      const row = document.createElement("div");
+      row.className = "xsel-opt" + (o.disabled ? " is-disabled" : "");
+      row.id = id + "o" + i;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(i === sel.selectedIndex));
+      row.style.setProperty("--i", String(i));
+      row.dataset.i = String(i);
+      row.title = o.title || o.textContent;
+      const tick = document.createElement("span");
+      tick.className = "xsel-opt__tick";
+      const lab = document.createElement("span");
+      lab.className = "xsel-opt__label";
+      lab.textContent = o.textContent;
+      row.append(tick, lab);
+      panel.appendChild(row);
+    });
+    markCursor();
+  }
+
+  function place() {
+    if (!panel) return;
+    const r = btn.getBoundingClientRect(), gap = 6;
+    // Le formulaire défile sous le panneau : quand le bouton sort de l'écran,
+    // le panneau resterait collé au bord, détaché de son champ. On ferme.
+    if (r.bottom < 0 || r.top > window.innerHeight) { close(false); return; }
+    panel.style.minWidth = r.width + "px";
+    panel.style.maxWidth = Math.max(160, window.innerWidth - 16) + "px";
+    const h = panel.offsetHeight, w = panel.offsetWidth;
+    // La fenêtre descend à 420 px de haut : sous le pli, le panneau se retourne.
+    const below = window.innerHeight - r.bottom - gap;
+    const up = below < h && r.top - gap > below;
+    panel.classList.toggle("is-up", up);
+    const top = Math.max(8, Math.min(up ? r.top - gap - h : r.bottom + gap,
+                                     window.innerHeight - h - 8));
+    panel.style.top = top + "px";
+    panel.style.left = Math.min(Math.max(8, r.left), window.innerWidth - w - 8) + "px";
+  }
+
+  function markCursor() {
+    if (!panel) return;
+    [...panel.children].forEach((row, i) => row.classList.toggle("is-cursor", i === cursor));
+    const row = panel.children[cursor];
+    if (row) {
+      btn.setAttribute("aria-activedescendant", row.id);
+      row.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function setCursor(i) {
+    const n = sel.options.length;
+    if (!n) return;
+    cursor = Math.max(0, Math.min(n - 1, i));
+    markCursor();
+  }
+
+  function moveCursor(d) {
+    const n = sel.options.length;
+    if (!n) return;
+    let i = cursor < 0 ? (d > 0 ? -1 : 0) : cursor;
+    for (let k = 0; k < n; k++) {           // saute les options désactivées
+      i = (i + d + n) % n;
+      if (!sel.options[i].disabled) break;
+    }
+    setCursor(i);
+  }
+
+  function open() {
+    if (panel) return;
+    panel = document.createElement("div");
+    panel.className = "xsel-panel";
+    panel.setAttribute("role", "listbox");
+    cursor = sel.selectedIndex;
+    render();
+    document.body.appendChild(panel);
+    place();
+    btn.setAttribute("aria-expanded", "true");
+    panel.addEventListener("pointerdown", (e) => e.preventDefault());  // garde le focus au bouton
+    panel.addEventListener("click", (e) => {
+      const row = e.target.closest(".xsel-opt");
+      if (row) choose(+row.dataset.i);
+    });
+    document.addEventListener("pointerdown", onDocDown, true);
+    window.addEventListener("resize", place);
+    // En capture : `.form` défile en overflow-y:auto, et son défilement ne
+    // remonte pas jusqu'à window en phase de bouillonnement.
+    window.addEventListener("scroll", place, true);
+  }
+
+  function close(refocus) {
+    if (!panel) return;
+    const p = panel;
+    panel = null;
+    btn.setAttribute("aria-expanded", "false");
+    btn.removeAttribute("aria-activedescendant");
+    document.removeEventListener("pointerdown", onDocDown, true);
+    window.removeEventListener("resize", place);
+    window.removeEventListener("scroll", place, true);
+    // Le panneau reste affiché le temps de son animation de sortie. On le sort
+    // tout de suite des sélecteurs vivants : sinon, ouvrir une autre liste
+    // pendant ces 130 ms fait cohabiter deux `.xsel-panel` dans le document.
+    // Le panneau reste affiché le temps de son animation de sortie. On lui
+    // retire son rôle et son curseur tout de suite : une liste en train de
+    // disparaître ne doit plus être annoncée ni comptée comme active.
+    p.classList.add("is-closing");
+    p.removeAttribute("role");
+    [...p.children].forEach((row) => row.classList.remove("is-cursor"));
+    const drop = () => p.remove();
+    p.addEventListener("animationend", drop, { once: true });
+    setTimeout(drop, 260);  // filet : en reduced-motion il n'y a pas d'animation
+    if (refocus) btn.focus();
+  }
+
+  function choose(i) {
+    const o = sel.options[i];
+    if (!o || o.disabled) return;
+    if (sel.selectedIndex !== i) {
+      sel.selectedIndex = i;
+      // Le code existant écoute `change` sur #lang — il doit continuer à partir.
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    syncButton();
+    close(true);
+  }
+
+  function onDocDown(e) {
+    if (!panel) return;
+    if (!panel.contains(e.target) && !btn.contains(e.target)) close(false);
+  }
+
+  btn.addEventListener("click", () => (panel ? close(true) : open()));
+
+  btn.addEventListener("keydown", (e) => {
+    const k = e.key;
+    if (k === "Escape") { if (panel) { e.preventDefault(); close(true); } return; }
+    if (k === "ArrowDown" || k === "ArrowUp") {
+      e.preventDefault();
+      if (!panel) open(); else moveCursor(k === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (k === "Enter" || k === " ") {
+      e.preventDefault();
+      if (!panel) open(); else choose(cursor);
+      return;
+    }
+    if (panel && (k === "Home" || k === "End")) {
+      e.preventDefault();
+      setCursor(k === "Home" ? 0 : sel.options.length - 1);
+      return;
+    }
+    // Saisie au clavier : les noms de micro se ressemblent tous par le début,
+    // on accumule donc les lettres tapées coup sur coup.
+    if (k.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const now = Date.now();
+      typed = now - typedAt > 800 ? k : typed + k;
+      typedAt = now;
+      const p = typed.toLowerCase();
+      const hit = [...sel.options].findIndex(
+        (o) => !o.disabled && o.textContent.toLowerCase().startsWith(p));
+      if (hit >= 0) { if (!panel) open(); setCursor(hit); }
+    }
+  });
+
+  // Le reste du code reconstruit les <option> (liste des micros), écrit
+  // `.value` / `.selectedIndex` et laisse l'i18n réécrire les libellés. On
+  // couvre les deux voies : l'observateur pour le DOM, l'interception des
+  // accesseurs pour la valeur — `sel.value = "2"` ne produit ni mutation ni
+  // événement, et le bouton afficherait encore l'ancien micro.
+  new MutationObserver(() => { syncButton(); if (panel) render(); }).observe(sel, {
+    childList: true, subtree: true, characterData: true, attributes: true,
+  });
+  ["value", "selectedIndex"].forEach((prop) => {
+    const d = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, prop);
+    if (!d || !d.set) return;
+    Object.defineProperty(sel, prop, {
+      configurable: true,
+      get() { return d.get.call(this); },
+      set(v) { d.set.call(this, v); syncButton(); if (panel) render(); },
+    });
+  });
+
+  syncButton();
+}
+
+function initSelects() {
+  document.querySelectorAll(".select > select").forEach(enhanceSelect);
+}
+
 /* ---------- Forme d'onde (canvas) ---------- */
 const wave = { mode: "loading", cv: null, ctx: null, bars: [], grad: null };
 const NB = 54;
@@ -442,6 +675,7 @@ function initWindowControls() {
 /* ---------- Démarrage ---------- */
 window.addEventListener("DOMContentLoaded", () => {
   initTabs();
+  initSelects();
   initWave();
   wireControls();
   initWindowControls();

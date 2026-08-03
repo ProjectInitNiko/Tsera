@@ -200,6 +200,82 @@ body::after {
 .select__chevron { position:absolute; right:12px; top:50%; transform:translateY(-50%);
   width:12px; height:8px; stroke:var(--muted); stroke-width:1.5; fill:none; pointer-events:none; stroke-linecap:round; stroke-linejoin:round; }
 
+/* ---- Listes déroulantes ----
+   Le <select> natif reste dans le DOM et garde la valeur : tout le code qui
+   lit .value, écrit .value ou reconstruit les <option> continue de marcher, et
+   si le script échoue la liste native reprend la main. Il est seulement retiré
+   de la vue et du parcours clavier ; c'est le bouton qui porte l'ARIA. */
+.select.is-enhanced select {
+  position:absolute; inset:0; width:100%; height:100%;
+  opacity:0; pointer-events:none;
+}
+.select.is-enhanced .select__chevron { display:none; }
+
+.xsel {
+  display:flex; align-items:center; gap:8px; width:100%;
+  font-family:var(--font-ui); font-size:13px; color:var(--text); text-align:left;
+  background:var(--panel); border:1px solid var(--edge); border-radius:var(--r-sm);
+  padding:9px 11px; cursor:pointer;
+  transition:border-color .16s, background .16s, box-shadow .16s;
+}
+.xsel:hover { border-color:var(--amber-dim); background:var(--panel-hi); }
+.xsel:focus-visible { outline:none; border-color:var(--amber-dim); box-shadow:0 0 0 3px rgba(255,170,43,.18); }
+.xsel[aria-expanded="true"] {
+  border-color:var(--amber-dim); background:var(--panel-hi);
+  box-shadow:0 0 0 3px rgba(255,170,43,.12);
+}
+/* Un nom de micro dépasse largement la largeur en fenêtre étroite. */
+.xsel__value { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.xsel__value.is-empty { color:var(--muted-2); }
+.xsel__chev {
+  flex:0 0 auto; width:12px; height:8px; stroke:var(--muted); stroke-width:1.5;
+  fill:none; stroke-linecap:round; stroke-linejoin:round;
+  transition:transform .2s cubic-bezier(.4,0,.2,1), stroke .16s;
+}
+.xsel[aria-expanded="true"] .xsel__chev { transform:rotate(180deg); stroke:var(--amber); }
+
+/* Ancré au body en position:fixed : `.form` défile en overflow-y:auto et
+   rognerait un panneau posé en absolute dans le formulaire. */
+.xsel-panel {
+  position:fixed; z-index:120;
+  background:var(--panel-hi); border:1px solid var(--edge); border-radius:var(--r-sm);
+  box-shadow:0 14px 34px rgba(0,0,0,.55), 0 0 0 1px rgba(255,170,43,.06);
+  padding:4px; max-height:min(280px, 60vh); overflow-y:auto;
+  transform-origin:top center;
+  animation:xsel-in .18s cubic-bezier(.16,1,.3,1) both;
+}
+.xsel-panel.is-up { transform-origin:bottom center; }
+.xsel-panel.is-closing { animation:xsel-out .13s ease-in both; pointer-events:none; }
+@keyframes xsel-in  { from { opacity:0; transform:translateY(-6px) scale(.97); } }
+@keyframes xsel-out { to   { opacity:0; transform:translateY(-4px) scale(.98); } }
+
+.xsel-panel::-webkit-scrollbar { width:8px; }
+.xsel-panel::-webkit-scrollbar-thumb { background:var(--edge); border-radius:4px; }
+
+.xsel-opt {
+  display:flex; align-items:center; gap:8px;
+  padding:8px 10px; border-radius:6px; cursor:pointer;
+  font-size:13px; line-height:1.35; color:var(--text);
+  transition:background .13s, color .13s;
+  animation:xsel-item .22s cubic-bezier(.16,1,.3,1) both;
+  animation-delay:calc(var(--i, 0) * 22ms);
+}
+@keyframes xsel-item { from { opacity:0; transform:translateX(-10px); } }
+.xsel-opt__label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Pastille toujours présente : sans elle les libellés se décalent à la sélection. */
+.xsel-opt__tick { flex:0 0 auto; width:6px; height:6px; border-radius:50%; background:transparent; }
+.xsel-opt:hover, .xsel-opt.is-cursor { background:rgba(255,241,222,.05); }
+.xsel-opt.is-cursor { box-shadow:inset 0 0 0 1px var(--edge); }
+.xsel-opt[aria-selected="true"] { color:var(--amber); }
+.xsel-opt[aria-selected="true"] .xsel-opt__tick { background:var(--amber); box-shadow:0 0 7px rgba(255,170,43,.75); }
+.xsel-opt.is-disabled { color:var(--muted-2); cursor:not-allowed; }
+.xsel-opt.is-disabled:hover { background:transparent; }
+
+@media (prefers-reduced-motion:reduce) {
+  .xsel-panel, .xsel-panel.is-closing, .xsel-opt { animation:none; }
+  .xsel__chev { transition:none; }
+}
+
 .switches { display:flex; flex-direction:column; gap:12px; }
 .switch { display:flex; align-items:center; gap:11px; cursor:pointer; }
 .switch input { position:absolute; opacity:0; width:0; height:0; }
